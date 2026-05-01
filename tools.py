@@ -1,4 +1,6 @@
+from __future__ import annotations
 # -*- coding: utf-8 -*-
+import functools
 import inspect
 import json
 import logging
@@ -57,6 +59,7 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
+@functools.lru_cache(maxsize=16)
 def web_search(q: str) -> str:
     """
     網頁搜尋：回傳少量、結構化摘要，避免 context 爆大。
@@ -217,6 +220,33 @@ socket.socket.connect = _safe_connect
         return format_result(False, str(e), error_type="execution_error")
 
 
+def get_skill(skill_name: str) -> str:
+    """
+    Lazy load an Antigravity skill using markitdown for clean parsing.
+    """
+    try:
+        from markitdown import MarkItDown
+        md = MarkItDown()
+        
+        skill_name = str(skill_name).strip()
+        skill_dir = Config.SKILLS_DIR / skill_name
+        
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_file.exists():
+            matches = list(skill_dir.glob("SKILL.*"))
+            if matches:
+                skill_file = matches[0]
+            else:
+                return format_result(False, f"Skill '{skill_name}' not found at {skill_file}", error_type="not_found")
+        
+        result = md.convert(str(skill_file))
+        content = result.text_content
+        
+        return format_result(True, f"Skill '{skill_name}' loaded successfully.", data={"skill_name": skill_name, "content": _truncate(content, 12000)})
+    except Exception as e:
+        return format_result(False, f"Failed to load skill: {e}", error_type="runtime_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
@@ -224,6 +254,7 @@ TOOLS_REGISTRY = {
     "write_file": write_file,
     "read_file": read_file,
     "run_python_script": run_python_script,
+    "get_skill": get_skill,
 }
 
 

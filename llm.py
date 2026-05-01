@@ -1,3 +1,4 @@
+from __future__ import annotations
 # -*- coding: utf-8 -*-
 import time
 import logging
@@ -49,7 +50,7 @@ def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def call_gemini_rescue(history: list, retries: int = 2) -> str:
+def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: int = 2) -> str:
     """
     Gemini acts as a rescue supervisor.
     Output must be a single fenced JSON block.
@@ -59,7 +60,13 @@ def call_gemini_rescue(history: list, retries: int = 2) -> str:
         "Return ONLY one fenced JSON block.\n"
         "No explanation. No markdown outside the JSON block. No thoughts.\n"
         "Choose the single best next action to debug errors or recover from loop/format failure.\n"
-        "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, mark_done.\n"
+        "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, get_skill, plan, mark_done.\n"
+        "Note: Use run_cmd with 'pip install <pkg>' if you need third-party packages.\n"
+    )
+    if stuck_reason:
+        rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
+    
+    rescue_prompt += (
         "Use this exact format:\n"
         "```json\n"
         "{\"action\":\"run_python_script\",\"kwargs\":{\"code\":\"print('Debugging...')\"}}\n"

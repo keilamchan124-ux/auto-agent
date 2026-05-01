@@ -1,4 +1,4 @@
-# config.py
+from __future__ import annotations
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -21,6 +21,7 @@ class Config:
     # ===== WORKSPACE =====
     WORKSPACE_DIR = Path(os.getenv("WORKSPACE_DIR", "workspace")).resolve()
     TODO_FILE = Path(os.getenv("TODO_FILE", "todo.txt"))
+    SKILLS_DIR = WORKSPACE_DIR / ".agents" / "skills"
 
     # ===== AGENT 控制 =====
     MAX_STEPS = int(os.getenv("MAX_STEPS", 50))
@@ -37,6 +38,30 @@ class Config:
         os.getenv("ALLOWED_BINARIES", "python,python3,ls,cat,echo").split(",")
     )
     ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "*").split(",") if d.strip()]
+
+    # ===== ANTIGRAVITY =====
+    IS_ANTIGRAVITY = os.getenv("ANTIGRAVITY_MODE") == "1" or (WORKSPACE_DIR / ".antigravity").exists()
+
+    # ===== SYSTEM PROMPT =====
+    _BASE_PROMPT = (
+        "Robotic Executor.\n"
+        "ONLY JSON.\n"
+        "Output exactly one fenced JSON block.\n"
+        "No thoughts. No explanations.\n"
+        "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, get_skill, plan, mark_done.\n"
+        "Schema: {\"action\":\"...\", \"kwargs\":{...}}\n"
+        "Note: Use `get_skill` with `{\"skill_name\": \"<name>\"}` to lazy-load engineering skills.\n"
+        "Recommended skills: 'code-review-and-quality', 'test-driven-development', 'planning-and-task-breakdown', 'debugging-and-error-recovery'."
+    )
+
+    SYSTEM_PROMPT = _BASE_PROMPT
+    if IS_ANTIGRAVITY:
+        SYSTEM_PROMPT += (
+            "\n[ANTIGRAVITY MODE ENABLED]\n"
+            "- You must generate detailed artifacts for the user to review.\n"
+            "- Consider terminal review policy (SafeToAutoRun vs manual approval).\n"
+            "- Follow all best practices in SKILL.md rules if available."
+        )
 
 
 # ===== 初始化 =====

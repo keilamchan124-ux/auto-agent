@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 import json
 import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+import json_repair
+
 
 from config import Config
 import llm
@@ -13,19 +17,92 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("AgentV7.2")
 
 
+
+@dataclass
+class AgentState:
+    last_action: Optional[str] = None
+    repeat_count: int = 0
+    parse_fail_count: int = 0
+    search_count: int = 0
+    hard_reset_count: int = 0
+    error_count: int = 0
+
 class Agent:
     def __init__(self):
-        self.reset_counters()
+        self.state_file = Config.WORKSPACE_DIR / "state.json"
+        self.load_state()
+
+    def load_state(self):
+        if self.state_file.exists():
+            try:
+                data = json.loads(self.state_file.read_text("utf-8"))
+                self.state = AgentState(**data)
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load state: {e}")
+        self.state = AgentState()
+
+    def save_state(self):
+        self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
 
     def reset_counters(self):
-        self.last_action: Optional[str] = None
-        self.repeat_count = 0
-        self.parse_fail_count = 0
-        self.search_count = 0
-        self.hard_reset_count = 0
-        self.error_count = 0
+        self.state = AgentState()
+        self.save_state()
 
+    def _write_antigravity_report(self, task: str, success: bool, steps: int):
+        report_path = Config.WORKSPACE_DIR / "artifacts" / "agent_execution_report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        content = f"""# Agent V7.2 Execution Report
+
+**Task**: {task}
+**Status**: {"✅ Success" if success else "⚠️ Needs Manual Intervention"}
+**Steps**: {steps}
+**Time**: {time.strftime("%Y-%m-%d %H:%M:%S")}
+
+## Execution Summary
+Task executed successfully.
+
+## Actions Log
+"""
+        report_path.write_text(content, encoding="utf-8")
+
+    def append_trace(self, action: str, kwargs: dict, result: dict):
+        trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
+        with open(trace_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": time.time(), "action": action, "kwargs": kwargs, "result": result}, ensure_ascii=False) + "\n")
+            
     # ---------- Context / History ----------
+    def smart_summarize_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        if len(msgs) <= 6:
+            return self.smart_summarize_history(msgs)
+
+        recent = msgs[-4:]
+        old_history = msgs[2:-4]
+
+        if not old_history:
+            return msgs
+
+        summary_prompt = (
+            "請用 300 字以內摘要以下對話歷史，只保留關鍵事實、已完成的步驟、重要發現：\n" + 
+            "\n".join([str(m.get("content", ""))[:300] for m in old_history])
+        )
+
+        try:
+            summary_resp = llm.call_gemini_rescue([{"role": "user", "content": summary_prompt}])
+            summary_obj = self.extract_json(summary_resp)
+            summary_text = summary_obj.get("summary", summary_resp[:500]) if summary_obj else summary_resp[:500]
+        except Exception as e:
+            logger.warning(f"History summary failed: {e}")
+            summary_text = "歷史摘要失敗，保留原始最近訊息"
+
+        summarized = [
+            msgs[0],
+            msgs[1],
+            {"role": "user", "content": f"[歷史摘要] {summary_text}"},
+        ] + recent
+
+        return summarized
+
     def trim_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """
         Keep history small and clean:
@@ -60,11 +137,36 @@ class Agent:
 
     # ---------- Parsing ----------
     def extract_json(self, text: str) -> Optional[Dict[str, Any]]:
-        """
-        Prefer fenced JSON. Fallback to raw JSON object only.
-        """
         if not text:
             return None
+
+        # 1. strict fenced block
+        match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            try:
+                res = json_repair.loads(match.group(1))
+                if isinstance(res, dict): return res
+            except Exception:
+                pass
+
+        # 2. Try json-repair on whole text
+        try:
+            repaired = json_repair.repair_json(text, return_objects=True)
+            if isinstance(repaired, dict):
+                return repaired
+        except Exception:
+            pass
+
+        # 3. fallback
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if match:
+            try:
+                res = json.loads(match.group(1))
+                if isinstance(res, dict): return res
+            except Exception:
+                pass
+
+        return None
 
         # 1) strict fenced block
         match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
@@ -115,11 +217,11 @@ class Agent:
 
     # ---------- Guards ----------
     def update_repeat_guard(self, action: str) -> None:
-        if action == self.last_action:
-            self.repeat_count += 1
+        if action == self.state.last_action:
+            self.state.repeat_count += 1
         else:
-            self.last_action = action
-            self.repeat_count = 1
+            self.state.last_action = action
+            self.state.repeat_count = 1
 
     def should_force_rescue(self) -> bool:
         """
@@ -128,13 +230,13 @@ class Agent:
         - too many repeated actions
         - too many repeated searches
         """
-        if self.parse_fail_count >= 2:
+        if self.state.parse_fail_count >= 2:
             return True
-        if self.repeat_count >= 3:
+        if self.state.repeat_count >= 3:
             return True
-        if self.search_count >= 4:
+        if self.state.search_count >= 4:
             return True
-        if self.error_count >= 2:
+        if self.state.error_count >= 2:
             return True
         return False
 
@@ -142,11 +244,11 @@ class Agent:
         """
         E: hard reset when stuck too long.
         """
-        if self.hard_reset_count >= 1:
+        if self.state.hard_reset_count >= 1:
             return False
 
-        if self.parse_fail_count >= 4 or self.repeat_count >= 5 or self.search_count >= 6 or self.error_count >= 3:
-            self.hard_reset_count += 1
+        if self.state.parse_fail_count >= 4 or self.state.repeat_count >= 5 or self.state.search_count >= 6 or self.state.error_count >= 3:
+            self.state.hard_reset_count += 1
             self.reset_counters()
             msgs.append({
                 "role": "user",
@@ -174,14 +276,7 @@ class Agent:
         msgs: List[Dict[str, str]] = [
             {
                 "role": "system",
-                "content": (
-                    "Robotic Executor.\n"
-                    "ONLY JSON.\n"
-                    "Output exactly one fenced JSON block.\n"
-                    "No thoughts. No explanations.\n"
-                    "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, mark_done.\n"
-                    "Schema: {\"action\":\"...\", \"kwargs\":{...}}"
-                )
+                "content": Config.SYSTEM_PROMPT
             },
             {"role": "user", "content": task}
         ]
@@ -200,13 +295,13 @@ class Agent:
 
             if need_rescue:
                 logger.warning("🆘 Agent stuck. Calling Gemini for rescue...")
-                rescue_text = llm.call_gemini_rescue(self.trim_history(msgs))
+                rescue_text = llm.call_gemini_rescue(self.smart_summarize_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
                 parsed = self.extract_json(rescue_text)
 
-                self.parse_fail_count = 0
-                self.repeat_count = 0
-                self.search_count = 0
-                self.error_count = 0
+                self.state.parse_fail_count = 0
+                self.state.repeat_count = 0
+                self.state.search_count = 0
+                self.state.error_count = 0
 
                 if not parsed:
                     msgs.append({
@@ -215,30 +310,30 @@ class Agent:
                     })
                     continue
             else:
-                resp = llm.call_mimo(self.trim_history(msgs))
+                resp = llm.call_mimo(self.smart_summarize_history(msgs))
                 content = resp.get("content", "")
                 parsed = self.extract_json(content)
 
             # B: format fail handling
             if not parsed:
-                self.parse_fail_count += 1
+                self.state.parse_fail_count += 1
 
-                if self.parse_fail_count == 1:
+                if self.state.parse_fail_count == 1:
                     msgs.append({
                         "role": "user",
                         "content": "FORMAT ERROR: return exactly one ```json block only."
                     })
-                elif self.parse_fail_count == 2:
+                elif self.state.parse_fail_count == 2:
                     msgs.append({
                         "role": "user",
                         "content": "STRICT FORMAT ERROR: ONLY ONE JSON BLOCK. NO EXTRA TEXT."
                     })
                 else:
                     logger.warning("🆘 Too many format failures, forcing rescue...")
-                    rescue_text = llm.call_gemini_rescue(self.trim_history(msgs))
+                    rescue_text = llm.call_gemini_rescue(self.smart_summarize_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
                     parsed = self.extract_json(rescue_text)
-                    self.parse_fail_count = 0
-                    self.repeat_count = 0
+                    self.state.parse_fail_count = 0
+                    self.state.repeat_count = 0
 
                     if not parsed:
                         msgs.append({
@@ -256,11 +351,12 @@ class Agent:
 
             # repeat guard
             self.update_repeat_guard(action)
+            self.save_state()
 
             # C + A: store only clean assistant JSON, not raw thoughts
             self.append_clean_assistant(msgs, action, kwargs)
 
-            if self.repeat_count >= 3:
+            if self.state.repeat_count >= 3:
                 msgs.append({
                     "role": "user",
                     "content": f"STOP REPEATING {action}. Change your plan."
@@ -269,11 +365,12 @@ class Agent:
 
             # D: count search repetition
             if action == "web_search":
-                self.search_count += 1
+                self.state.search_count += 1
 
             # finish
             if action == "mark_done":
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
+                self._write_antigravity_report(task, True, step)
                 break
 
             # execute
@@ -287,17 +384,19 @@ class Agent:
                 }
 
             if not res_data.get("ok", False):
-                self.error_count += 1
+                self.state.error_count += 1
             else:
-                self.error_count = 0
+                self.state.error_count = 0
 
             # D: compact result back to context
             self.append_clean_result(msgs, res_data)
+            self.append_trace(action, kwargs, res_data)
 
             logger.info("🛠️ %s executed. ok=%s", action, res_data.get("ok", False))
 
         else:
             logger.warning("Max steps reached.")
+            self._write_antigravity_report(task, False, max_steps)
 
     def start(self):
         logger.info("🤖 Agent V7.2 Active.")
