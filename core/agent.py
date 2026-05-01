@@ -431,7 +431,7 @@ Task executed successfully.
         else:
             logger.info("ℹ️ No skills auto-loaded. Agent will discover on its own.")
 
-        max_steps = getattr(Config, "MAX_STEPS", 25)
+        max_steps = getattr(Config, "MAX_STEPS", 40)
 
         for step in range(1, max_steps + 1):
             self.current_step = step
