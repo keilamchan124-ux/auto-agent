@@ -1,6 +1,8 @@
 .env
 __pycache__/
+*.pyc
 *.log
 workspace/
 todo.txt
 task.txt
+agent_crash.log

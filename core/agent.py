@@ -72,36 +72,6 @@ Task executed successfully.
             f.write(json.dumps({"time": time.time(), "action": action, "kwargs": kwargs, "result": result}, ensure_ascii=False) + "\n")
             
     # ---------- Context / History ----------
-    def smart_summarize_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        if len(msgs) <= 6:
-            return self.trim_history(msgs)
-
-        recent = msgs[-4:]
-        old_history = msgs[2:-4]
-
-        if not old_history:
-            return msgs
-
-        summary_prompt = (
-            "請用 300 字以內摘要以下對話歷史，只保留關鍵事實、已完成的步驟、重要發現：\n" + 
-            "\n".join([str(m.get("content", ""))[:300] for m in old_history])
-        )
-
-        try:
-            summary_resp = llm.call_gemini_rescue([{"role": "user", "content": summary_prompt}])
-            summary_obj = self.extract_json(summary_resp)
-            summary_text = summary_obj.get("summary", summary_resp[:500]) if summary_obj else summary_resp[:500]
-        except Exception as e:
-            logger.warning(f"History summary failed: {e}")
-            summary_text = "歷史摘要失敗，保留原始最近訊息"
-
-        summarized = [
-            msgs[0],
-            msgs[1],
-            {"role": "user", "content": f"[歷史摘要] {summary_text}"},
-        ] + recent
-
-        return summarized
 
     def trim_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """
@@ -167,7 +137,6 @@ Task executed successfully.
                 pass
 
         return None
-        return None
 
     # ---------- Context append ----------
     def append_clean_assistant(self, msgs: List[Dict[str, str]], action: str, kwargs: Dict[str, Any]) -> None:
@@ -184,12 +153,15 @@ Task executed successfully.
 
     def append_clean_result(self, msgs: List[Dict[str, str]], result: Dict[str, Any]) -> None:
         """
-        A + D: only store compact result.
+        A + D: store compact result but preserve data for tools like web_search/get_skill.
         """
         compact = {
             "ok": bool(result.get("ok", False)),
-            "msg": str(result.get("message", ""))[:120]
+            "msg": str(result.get("message", ""))  # Do not hard-truncate to 120 chars
         }
+        if "data" in result:
+            compact["data"] = result["data"]
+
         if not compact["ok"]:
             compact["err"] = str(result.get("error_type", "error"))
 
@@ -264,7 +236,7 @@ Task executed successfully.
             {"role": "user", "content": task}
         ]
 
-        max_steps = getattr(Config, "MAX_STEPS", 20)
+        max_steps = getattr(Config, "MAX_STEPS", 25)
 
         for step in range(1, max_steps + 1):
             logger.info("🧠 Step %s/%s", step, max_steps)
@@ -278,7 +250,7 @@ Task executed successfully.
 
             if need_rescue:
                 logger.warning("🆘 Agent stuck. Calling Gemini for rescue...")
-                rescue_text = llm.call_gemini_rescue(self.smart_summarize_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
+                rescue_text = llm.call_gemini_rescue(self.trim_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
                 parsed = self.extract_json(rescue_text)
 
                 self.state.parse_fail_count = 0
@@ -293,7 +265,7 @@ Task executed successfully.
                     })
                     continue
             else:
-                resp = llm.call_mimo(self.smart_summarize_history(msgs))
+                resp = llm.call_mimo(self.trim_history(msgs))
                 content = resp.get("content", "")
                 parsed = self.extract_json(content)
 
@@ -313,7 +285,7 @@ Task executed successfully.
                     })
                 else:
                     logger.warning("🆘 Too many format failures, forcing rescue...")
-                    rescue_text = llm.call_gemini_rescue(self.smart_summarize_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
+                    rescue_text = llm.call_gemini_rescue(self.trim_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
                     parsed = self.extract_json(rescue_text)
                     self.state.parse_fail_count = 0
                     self.state.repeat_count = 0
@@ -359,6 +331,15 @@ Task executed successfully.
             # execute
             try:
                 res_data = self.execute_tool_safe(action, kwargs)
+                
+                # 攔截 Skill 載入，將內容直接注入 System Prompt，避免被 History Truncate / Summarize 丟棄
+                if action in ["get_skill", "load_preset"] and res_data.get("ok") and "data" in res_data:
+                    skill_content = res_data["data"].get("content", "")
+                    if skill_content:
+                        msgs[0]["content"] += f"\n\n[LOADED SKILL/PRESET]\n{skill_content}"
+                        # 避免 context 雙重爆大，將 data 清空
+                        res_data["data"] = {"status": "Successfully injected into SYSTEM PROMPT."}
+                        
             except Exception as e:
                 res_data = {
                     "ok": False,

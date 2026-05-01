@@ -1,5 +1,5 @@
-from __future__ import annotations
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 import time
 import logging
 from typing import List, Dict, Any

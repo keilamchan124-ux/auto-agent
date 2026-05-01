@@ -1,9 +1,10 @@
-# 🤖 Agent V7.2 Project Context & Architecture
+# 🤖 Agent V7.2 — Project Context & Architecture
 
-> **To the Web AI reading this:** This document provides the complete context of the "Agent V7.2" project. Please use this to quickly understand the project structure, design patterns, and core capabilities before suggesting code modifications or answering user questions.
+> **To the AI reading this:** This document provides the complete context of the "Agent V7.2" project. Use this to quickly understand the structure, design patterns, and capabilities before suggesting changes or answering questions.
 
 ## 📌 Project Overview
-**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It is designed to act as an "Executor" that reads tasks, plans, searches the web, executes terminal commands, runs Python scripts, and repairs its own errors autonomously. It integrates natively with the **Antigravity** ecosystem and supports lazy-loading of engineering skills.
+
+**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It acts as an "Executor" — reads tasks from `todo.txt`, plans, searches the web, browses pages, runs terminal commands, executes Python scripts, and self-repairs errors. It supports dual-model architecture (Mimo + Gemini rescue), lazy-loaded engineering skills, Telegram bot remote control, and Antigravity ecosystem integration.
 
 ---
 
@@ -11,22 +12,25 @@
 
 ```text
 / (Project Root)
-├── main.py                  # Entry point for the application. Simply calls `Agent().start()`.
-├── start_agent.bat          # Batch script to run the agent in a continuous keep-alive loop.
-├── todo.txt                 # The agent polls this file. Writing a prompt here triggers the agent.
+├── main.py                  # Entry point. Calls `Agent().start()`.
+├── start_agent.bat          # Keep-alive wrapper: auto-restarts on crash.
+├── create_task.py           # CLI helper to write structured tasks to todo.txt.
+├── telegram_bot.py          # Telegram bot interface for remote task submission.
+├── todo.txt                 # Agent polls this file. Writing a prompt here triggers execution.
 ├── requirements.txt         # Dependencies (openai, google-genai, json-repair, markitdown, ddgs, etc.)
-├── .env                     # Environment variables (API Keys: MIMO_API_KEY, GEMINI_API_KEY)
-├── workspace/               # Isolated directory for the agent to execute tools and save outputs.
-│   ├── state.json           # Persistent counters (parse fails, repeat counts) to survive restarts.
-│   ├── execution_trace.jsonl# Log of all actions taken and their results.
-│   └── artifacts/           # Directory where the agent writes its execution reports.
-├── .agents/skills/          # Directory containing Addy Osmani's agent-skills (SKILL.md files).
-└── core/                    # Core backend logic module
+├── .env                     # Environment variables (API keys, Telegram token, model config)
+├── .gitignore               # Excludes .env, workspace/, __pycache__/, *.log, etc.
+├── workspace/               # Sandboxed directory for agent file I/O and tool execution.
+│   ├── state.json           # Persistent counters (parse fails, repeat counts) survive restarts.
+│   ├── execution_trace.jsonl# Append-only log of all actions taken and their results.
+│   └── artifacts/           # Agent writes execution reports here.
+├── .agents/skills/          # Addy Osmani's agent-skills collection (SKILL.md files).
+└── core/                    # Core backend logic package
     ├── __init__.py
     ├── agent.py             # Main execution loop, history management, state persistence.
-    ├── config.py            # Centralized configurations, System Prompt, and Environment checks.
-    ├── llm.py               # Wrappers for API calls (Mimo for execution, Gemini for rescue).
-    └── tools.py             # Tool definitions (web_search, run_cmd, run_python_script, get_skill, etc.)
+    ├── config.py            # Centralized configuration, System Prompt, env var loading.
+    ├── llm.py               # API wrappers (Mimo for execution, Gemini for rescue).
+    └── tools.py             # Tool implementations and registry (12 tools).
 ```
 
 ---
@@ -34,47 +38,90 @@
 ## 🧠 Core Architecture & Workflows
 
 ### 1. Dual-Model Architecture (`core/llm.py`)
-- **Primary Executor (Mimo)**: Uses `mimo-v2.5-pro` (via OpenAI SDK). It is instructed to ONLY output strict JSON blocks containing an `action` and `kwargs`. It has no internal thoughts in its output text (to save context), though reasoning is supported via `reasoning_effort`.
-- **Rescue Supervisor (Gemini)**: Uses `gemini-3-flash-preview`. If the primary executor gets stuck in a loop, fails to format JSON multiple times, or repeats the same error, `agent.py` truncates the history and calls Gemini to act as a "rescue controller" to break the loop.
+- **Primary Executor (Mimo)**: Uses `mimo-v2.5-pro` via OpenAI SDK. Outputs strict JSON blocks with `action` + `kwargs`. Supports `reasoning_effort: high`.
+- **Rescue Supervisor (Gemini)**: Uses `gemini-3-flash-preview`. Activated when the primary model gets stuck (repeated actions, parse failures, errors). Truncates history and asks Gemini for a recovery action.
 
 ### 2. State & Persistence (`core/agent.py`)
-- Uses an `AgentState` dataclass to track `repeat_count`, `parse_fail_count`, `error_count`, etc.
-- Saves state to `workspace/state.json` dynamically. If the agent crashes and is restarted by `start_agent.bat`, it resumes exactly where it left off with its counters intact.
+- `AgentState` dataclass tracks: `repeat_count`, `parse_fail_count`, `error_count`, `search_count`, `hard_reset_count`.
+- Saved to `workspace/state.json`. If crashed and restarted by `start_agent.bat`, the agent resumes with counters intact.
 
-### 3. Smart History Management
-- Context windows are aggressively managed. 
-- **`smart_summarize_history`**: When the conversation exceeds 6 steps, the agent extracts the oldest messages and uses Gemini to summarize them into a compact `[歷史摘要]` user message. It retains only the System Prompt, the initial Task, the Summary, and the 4 most recent turns.
+### 3. History Management (`trim_history`)
+- Context is aggressively managed to fit within `MAX_CONTEXT_CHARS` (default 60,000).
+- Keeps: System Prompt + initial task + most recent N messages (capped by `MAX_HISTORY`).
 
 ### 4. Robust JSON Parsing
-- The LLM output is parsed using `json_repair` (`extract_json`). It successfully extracts fenced code blocks (```json) and aggressively repairs broken JSON structures.
+- Three-tier extraction: fenced ```json blocks → `json_repair` on full text → raw regex `{...}` fallback.
+- Handles broken/malformed LLM outputs gracefully.
 
 ### 5. Tools Engine (`core/tools.py`)
-The agent has strict schema constraints. Tools include:
-- `web_search`: Uses DuckDuckGo (`ddgs`). Cached via `@functools.lru_cache(maxsize=16)`.
-- `run_cmd`: Executes terminal commands. Strictly guarded by `ALLOWED_BINARIES` in `config.py` (e.g., `python`, `ls`).
-- `run_python_script`: Writes Python code to a temp file and executes it. 
-- `get_skill`: Lazy-loads engineering skills from `.agents/skills/<name>/SKILL.md` using Microsoft's `markitdown` for clean parsing.
+12 registered tools with strict schema constraints:
 
-### 6. Antigravity Ecosystem Integration
-- If `IS_ANTIGRAVITY` is True (checked via env vars or `.antigravity` folder), the System Prompt strictly enforces artifact generation and careful terminal execution policies.
-- Automatically writes an `agent_execution_report.md` artifact at the end of a task.
+| Tool | Description |
+|------|-------------|
+| `web_search` | DuckDuckGo search. Cached via `@lru_cache(16)`. |
+| `browse_page` | Fetches URL → converts HTML/PDF to Markdown via `markitdown`. |
+| `download_file` | Downloads files. Blocks HTML pages from being saved as files. |
+| `run_cmd` | Terminal commands. Guarded by `ALLOWED_BINARIES` whitelist. |
+| `write_file` | Write to workspace (sandboxed). |
+| `read_file` | Read from workspace (sandboxed). |
+| `run_python_script` | Executes Python code. Optional domain-level network guard. |
+| `get_skill` | Lazy-loads a single skill from `.agents/skills/<name>/SKILL.md`. |
+| `load_preset` | Loads a preset skill combo (e.g. `frontend`, `backend`, `debug`). |
+| `plan` | Records a plan for the agent's next steps. |
+| `git_commit` | Runs `git add . && git commit -m <msg>`. |
+| `mark_done` | Signals task completion. Writes execution report. |
+
+### 6. Skill Injection
+When `get_skill` or `load_preset` succeeds, the skill content is injected directly into the System Prompt (`msgs[0]`) to prevent it from being discarded during history trimming.
+
+### 7. Telegram Bot (`telegram_bot.py`)
+- Remote task submission via Telegram messages.
+- Commands: `/start`, `/status`, `/report`.
+- Auth: `TELEGRAM_ALLOWED_USER_ID` env var restricts access to a single user.
+- Writes tasks to `todo.txt`, which the main agent loop picks up.
+
+### 8. Antigravity Mode
+- Detected via `ANTIGRAVITY_MODE=1` env var or `.antigravity` folder in workspace.
+- Enables: mandatory artifact generation, terminal review policies, SKILL.md best practices.
+
+---
+
+## 🔧 Configuration (`core/config.py`)
+
+All config is loaded from environment variables (`.env` file) with sensible defaults:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MIMO_API_KEY` | — | Primary model API key |
+| `GEMINI_API_KEY` | — | Rescue model API key |
+| `MIMO_MODEL` | `mimo-v2.5-pro` | Primary model name |
+| `GEMINI_MODEL` | `gemini-3-flash-preview` | Rescue model name |
+| `MIMO_BASE_URL` | OpenAI default | Custom endpoint URL |
+| `MAX_STEPS` | `50` | Max execution steps per task |
+| `MAX_HISTORY` | `20` | Max messages kept in context |
+| `MAX_CONTEXT_CHARS` | `60000` | Character budget for context window |
+| `POLL_INTERVAL` | `2` | Seconds between todo.txt polls |
+| `ALLOWED_BINARIES` | `python,python3,ls,cat,echo` | Whitelist for `run_cmd` |
+| `ALLOWED_DOMAINS` | `*` | Network guard for `run_python_script` |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `TELEGRAM_ALLOWED_USER_ID` | — | Authorized Telegram user ID |
 
 ---
 
 ## 🛠️ How to Assist the User
 
-When the user asks you (the Web AI) to add a feature or fix a bug, please ask for the relevant files based on this mapping:
-
-1. **"I want to add a new tool for the agent to use"**
-   👉 Ask the user to upload `core/tools.py` and `core/config.py` (to update the System Prompt).
-2. **"The agent is stuck in an infinite loop"**
-   👉 Ask the user to upload `core/agent.py` (loop logic) and `core/llm.py` (rescue prompt).
-3. **"I want to change the agent's personality or instructions"**
-   👉 Ask the user to upload `core/config.py` (`SYSTEM_PROMPT`).
-4. **"The LLM API is failing or needs a new model provider"**
-   👉 Ask the user to upload `core/llm.py`.
+| User Request | Relevant Files |
+|---|---|
+| "Add a new tool" | `core/tools.py` (implement + register), `core/config.py` (update `_BASE_PROMPT` actions list) |
+| "Agent is stuck in a loop" | `core/agent.py` (guard logic), `core/llm.py` (rescue prompt) |
+| "Change agent personality" | `core/config.py` (`SYSTEM_PROMPT`) |
+| "LLM API failing / new provider" | `core/llm.py` |
+| "Telegram bot issue" | `telegram_bot.py`, `.env` |
+| "Task creation / presets" | `create_task.py`, `core/config.py` (`SKILL_PRESETS`) |
 
 ### Code Style Guidelines
-- **Typing**: Use strict Python type hints (`from typing import List, Dict, Any`, etc.).
-- **Future Imports**: All files must start with `from __future__ import annotations`.
-- **Error Handling**: Tools must return a strict JSON string using `format_result(ok: bool, message: str, data: dict, error_type: str)`. Never raise raw exceptions to the LLM.
+- **Typing**: Strict Python type hints (`from typing import List, Dict, Any`, etc.)
+- **Future imports**: All core files use `from __future__ import annotations`
+- **Encoding**: `# -*- coding: utf-8 -*-` as the first line
+- **Error handling**: Tools return structured JSON via `format_result(ok, message, data, error_type)`. Never raise raw exceptions to the LLM.
+- **Security**: All file I/O sandboxed to `workspace/` via `safe_path()`. Commands restricted by `ALLOWED_BINARIES`. Network restricted by `ALLOWED_DOMAINS`.

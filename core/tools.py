@@ -1,16 +1,19 @@
-from __future__ import annotations
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 import functools
 import inspect
 import json
 import logging
+import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
 import requests
 from ddgs import DDGS
+from markitdown import MarkItDown
 
 from core.config import Config
 
@@ -57,6 +60,45 @@ def safe_path(p: str) -> Path:
 def _truncate(text: str, limit: int) -> str:
     text = text or ""
     return text if len(text) <= limit else text[:limit]
+
+
+def browse_page(url: str) -> str:
+    """
+    讀取網頁內容並轉為乾淨的 Markdown，支援 HTML, PDF 等。
+    """
+    try:
+        url = str(url).strip()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "application/pdf" in ctype:
+            ext = ".pdf"
+        elif "text/html" in ctype:
+            ext = ".html"
+        else:
+            ext = ".txt"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        try:
+            md = MarkItDown()
+            result = md.convert(tmp_path)
+            content = result.text_content
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        return format_result(True, f"Successfully fetched {url}", data={"url": url, "content": _truncate(content, 30000)})
+    except Exception as e:
+        return format_result(False, f"Failed to fetch {url}: {e}", error_type="network_error")
 
 
 @functools.lru_cache(maxsize=16)
@@ -220,12 +262,43 @@ socket.socket.connect = _safe_connect
         return format_result(False, str(e), error_type="execution_error")
 
 
+def load_preset(preset_name: str) -> str:
+    """
+    一鍵載入多個預設 Skill組合。
+    """
+    try:
+        preset_name = str(preset_name).strip()
+        presets = getattr(Config, "SKILL_PRESETS", {})
+        if preset_name not in presets:
+            return format_result(False, f"Preset '{preset_name}' not found. Available: {list(presets.keys())}", error_type="not_found")
+        
+        md = MarkItDown()
+        
+        combined_content = []
+        for skill_name in presets[preset_name]:
+            skill_dir = Config.SKILLS_DIR / skill_name
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.exists():
+                matches = list(skill_dir.glob("SKILL.*"))
+                if matches:
+                    skill_file = matches[0]
+                else:
+                    continue
+            
+            result = md.convert(str(skill_file))
+            combined_content.append(f"--- SKILL: {skill_name} ---\n{result.text_content}")
+            
+        final_text = "\n\n".join(combined_content)
+        return format_result(True, f"Loaded preset '{preset_name}' ({len(presets[preset_name])} skills).", data={"preset": preset_name, "content": _truncate(final_text, 30000)})
+    except Exception as e:
+        return format_result(False, f"Failed to load preset: {e}", error_type="runtime_error")
+
+
 def get_skill(skill_name: str) -> str:
     """
     Lazy load an Antigravity skill using markitdown for clean parsing.
     """
     try:
-        from markitdown import MarkItDown
         md = MarkItDown()
         
         skill_name = str(skill_name).strip()
@@ -245,6 +318,36 @@ def get_skill(skill_name: str) -> str:
         return format_result(True, f"Skill '{skill_name}' loaded successfully.", data={"skill_name": skill_name, "content": _truncate(content, 12000)})
     except Exception as e:
         return format_result(False, f"Failed to load skill: {e}", error_type="runtime_error")
+
+
+def git_commit(message: str) -> str:
+    """
+    執行 git add . 及 git commit -m <message>。
+    """
+    try:
+        message = str(message).strip()
+        if not message:
+            return format_result(False, "Commit message is empty.", error_type="git_error")
+
+        subprocess.run(["git", "add", "."], cwd=Config.WORKSPACE_DIR, capture_output=True, timeout=30)
+        
+        r = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=Config.WORKSPACE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if r.returncode != 0 and "nothing to commit" not in r.stdout.lower():
+            return format_result(False, f"git commit failed: {r.stderr}", error_type="git_error")
+
+        out = r.stdout.strip() if r.returncode == 0 else "Nothing to commit."
+        return format_result(True, _truncate(out, 1200))
+    except subprocess.TimeoutExpired:
+        return format_result(False, "Git command timed out.", error_type="timeout_error")
+    except Exception as e:
+        return format_result(False, str(e), error_type="git_error")
 
 
 def plan(steps: str) -> str:
@@ -267,7 +370,10 @@ TOOLS_REGISTRY = {
     "read_file": read_file,
     "run_python_script": run_python_script,
     "get_skill": get_skill,
+    "load_preset": load_preset,
     "plan": plan,
+    "git_commit": git_commit,
+    "browse_page": browse_page,
 }
 
 
