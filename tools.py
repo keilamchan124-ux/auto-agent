@@ -171,12 +171,59 @@ def read_file(path: str) -> str:
         return format_result(False, str(e), error_type="io_error")
 
 
+def run_python_script(code: str) -> str:
+    """
+    執行一段 Python 程式碼，賦予 Agent 原生 Python 能力 (Antigravity!)
+    """
+    try:
+        if not code:
+            return format_result(False, "Empty code.", error_type="execution_error")
+
+        # 若 ALLOWED_DOMAINS 不是 '*' (不限制)，則在腳本頂部注入網路攔截器
+        if Config.ALLOWED_DOMAINS and "*" not in Config.ALLOWED_DOMAINS:
+            guard_code = """
+import socket
+_orig_connect = socket.socket.connect
+_ALLOWED_DOMAINS = """ + str(Config.ALLOWED_DOMAINS) + """
+def _safe_connect(self, address):
+    host = address[0]
+    if isinstance(host, str):
+        allowed = any(host == d or host.endswith('.' + d) for d in _ALLOWED_DOMAINS)
+        if not allowed:
+            raise PermissionError(f"Security Violation: Access to '{host}' is blocked by ALLOWED_DOMAINS policy.")
+    return _orig_connect(self, address)
+socket.socket.connect = _safe_connect
+"""
+            # 將安全守衛放在 Agent 寫出的程式碼最上方
+            code = guard_code.strip() + "\n\n" + code
+
+        script_path = safe_path(".temp_agent_script.py")
+        script_path.write_text(code, encoding="utf-8")
+
+        # 自動判斷要用 python 還是 python3
+        cmd_exe = "python3" if "python3" in Config.ALLOWED_BINARIES else "python"
+        
+        r = subprocess.run(
+            [cmd_exe, str(script_path)],
+            cwd=Config.WORKSPACE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        out = (r.stdout + "\n" + r.stderr).strip()
+        return format_result(True, _truncate(out or "Success (No output)", 2000))
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
     "run_cmd": run_cmd,
     "write_file": write_file,
     "read_file": read_file,
+    "run_python_script": run_python_script,
 }
 
 

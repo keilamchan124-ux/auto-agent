@@ -58,10 +58,11 @@ def call_gemini_rescue(history: list, retries: int = 2) -> str:
         "You are a rescue controller for an execution agent.\n"
         "Return ONLY one fenced JSON block.\n"
         "No explanation. No markdown outside the JSON block. No thoughts.\n"
-        "Choose the single best next action to recover from loop or format failure.\n"
+        "Choose the single best next action to debug errors or recover from loop/format failure.\n"
+        "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, mark_done.\n"
         "Use this exact format:\n"
         "```json\n"
-        "{\"action\":\"web_search\",\"kwargs\":{\"q\":\"...\"}}\n"
+        "{\"action\":\"run_python_script\",\"kwargs\":{\"code\":\"print('Debugging...')\"}}\n"
         "```"
     )
 
@@ -121,7 +122,7 @@ def call_mimo(messages: list, retries: int = 2) -> dict:
                 messages=clean_messages,
                 temperature=0.0,
                 extra_body={
-                    "reasoning_effort": "low"
+                    "reasoning_effort": "high"
                 }
             )
 

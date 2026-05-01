@@ -23,6 +23,7 @@ class Agent:
         self.parse_fail_count = 0
         self.search_count = 0
         self.hard_reset_count = 0
+        self.error_count = 0
 
     # ---------- Context / History ----------
     def trim_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -133,6 +134,8 @@ class Agent:
             return True
         if self.search_count >= 4:
             return True
+        if self.error_count >= 2:
+            return True
         return False
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
@@ -142,7 +145,7 @@ class Agent:
         if self.hard_reset_count >= 1:
             return False
 
-        if self.parse_fail_count >= 4 or self.repeat_count >= 5 or self.search_count >= 6:
+        if self.parse_fail_count >= 4 or self.repeat_count >= 5 or self.search_count >= 6 or self.error_count >= 3:
             self.hard_reset_count += 1
             self.reset_counters()
             msgs.append({
@@ -176,7 +179,7 @@ class Agent:
                     "ONLY JSON.\n"
                     "Output exactly one fenced JSON block.\n"
                     "No thoughts. No explanations.\n"
-                    "Available actions: web_search, download_file, run_cmd, write_file, read_file, mark_done.\n"
+                    "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, mark_done.\n"
                     "Schema: {\"action\":\"...\", \"kwargs\":{...}}"
                 )
             },
@@ -203,6 +206,7 @@ class Agent:
                 self.parse_fail_count = 0
                 self.repeat_count = 0
                 self.search_count = 0
+                self.error_count = 0
 
                 if not parsed:
                     msgs.append({
@@ -281,6 +285,11 @@ class Agent:
                     "message": str(e),
                     "error_type": "execution_error"
                 }
+
+            if not res_data.get("ok", False):
+                self.error_count += 1
+            else:
+                self.error_count = 0
 
             # D: compact result back to context
             self.append_clean_result(msgs, res_data)

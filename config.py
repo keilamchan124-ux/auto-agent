@@ -23,8 +23,8 @@ class Config:
     TODO_FILE = Path(os.getenv("TODO_FILE", "todo.txt"))
 
     # ===== AGENT 控制 =====
-    MAX_STEPS = int(os.getenv("MAX_STEPS", 20))
-    MAX_HISTORY = int(os.getenv("MAX_HISTORY", 10))
+    MAX_STEPS = int(os.getenv("MAX_STEPS", 50))
+    MAX_HISTORY = int(os.getenv("MAX_HISTORY", 20))
     POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 2))
 
     # ===== 防 Loop / 防爆 =====
@@ -36,6 +36,7 @@ class Config:
     ALLOWED_BINARIES = set(
         os.getenv("ALLOWED_BINARIES", "python,python3,ls,cat,echo").split(",")
     )
+    ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "*").split(",") if d.strip()]
 
 
 # ===== 初始化 =====
