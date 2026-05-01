@@ -254,31 +254,8 @@ Task executed successfully.
         return False
 
     def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
-        """只有在以下條件全部滿足時才提早結束 (Success Heuristics)"""
-        if self.state.plan_executed_count < 1:
-            return False
-            
-        if self.state.error_count > 0 or self.state.last_error is not None:
-            return False
-            
-        if current_step < 5:
-            return False
-            
-        ignore_files = {"state.json", "execution_trace.jsonl", "todo.txt", ".antigravity"}
-        workspace_files = [f for f in Config.WORKSPACE_DIR.iterdir() if f.is_file() and f.name not in ignore_files]
-        artifacts_dir = Config.WORKSPACE_DIR / "artifacts"
-        if artifacts_dir.exists() and artifacts_dir.is_dir():
-            workspace_files.extend([f for f in artifacts_dir.iterdir() if f.is_file()])
-            
-        if len(workspace_files) < 1:
-            return False
-            
-        total_chars = sum(len(m.get("content", "")) for m in msgs)
-        if total_chars > 45000:
-            return False
-            
-        logger.info("✅ 成功啟發式條件滿足，提早結束任務 (Success Heuristics)")
-        return True
+        """Early Stop 機制已取消，永遠不提早結束 (Success Heuristics disabled)"""
+        return False
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
         """
@@ -685,6 +662,19 @@ Task executed successfully.
                 if error_type == "tool_not_found" or "missing" in error_msg.lower() or "unexpected keyword" in error_msg.lower():
                     logger.warning("🚨 偵測到嚴重/工具參數錯誤，立即觸發 Rescue")
                     self.state.error_count = 3  # 直接拉高到觸發門檻
+                    
+                    # === 新增：提供正確參數格式提示 ===
+                    param_hints = {
+                        "read_file": "正確格式：read_file(path='檔案路徑')",
+                        "write_file": "正確格式：write_file(path='檔案路徑', content='內容')",
+                        "get_skill": "正確格式：get_skill(skill_name='技能名稱')",
+                        "plan": "正確格式：plan(steps='步驟內容')",
+                        "run_python_script": "正確格式：run_python_script(code='Python程式碼')",
+                    }
+                    hint = param_hints.get(action, "")
+                    if hint:
+                        logger.warning(f"⚠️ 工具參數錯誤提示: {hint}")
+                        res_data["message"] = f"{error_msg}\n{hint}"
                 else:
                     self.state.error_count += 1  # 執行期錯誤允許重試 2~3 次
             else:

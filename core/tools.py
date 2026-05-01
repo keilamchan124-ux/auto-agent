@@ -91,7 +91,7 @@ def _smart_file_summary(text: str, head: int = 60, tail: int = 20) -> dict:
     }
 
 
-def browse_page(url: str, full_output: bool = False) -> str:
+def browse_page(url: str, full_output: bool = True) -> str:
     """Fetch a page and convert it to clean Markdown (HTML/PDF/etc)."""
     try:
         url = str(url).strip()
@@ -135,7 +135,7 @@ def browse_page(url: str, full_output: bool = False) -> str:
 
 
 @functools.lru_cache(maxsize=16)
-def web_search(q: str, full_output: bool = False) -> str:
+def web_search(q: str, full_output: bool = True) -> str:
     """Web search with compact structured output to reduce context size."""
     try:
         q = str(q).strip()
@@ -194,20 +194,42 @@ def run_cmd(cmd: str) -> str:
         if not cmd:
             return format_result(False, "Empty command.", error_type="execution_error")
 
-        args = shlex.split(cmd)
-        if not args:
-            return format_result(False, "Empty command.", error_type="execution_error")
+        is_windows = os.name == "nt"
 
-        if args[0] not in Config.ALLOWED_BINARIES:
+        if is_windows:
+            args = shlex.split(cmd, posix=False)
+            if not args:
+                return format_result(False, "Empty command.", error_type="execution_error")
+            binary = args[0].strip("\"'")
+        else:
+            args = shlex.split(cmd)
+            if not args:
+                return format_result(False, "Empty command.", error_type="execution_error")
+            binary = args[0]
+
+        if binary == "cd":
+            return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
+
+        if binary not in Config.ALLOWED_BINARIES:
             return format_result(False, "Forbidden command.", error_type="security_error")
 
-        r = subprocess.run(
-            args,
-            cwd=Config.WORKSPACE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        if is_windows:
+            r = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=Config.WORKSPACE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        else:
+            r = subprocess.run(
+                args,
+                cwd=Config.WORKSPACE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
 
         out = (r.stdout + r.stderr).strip()
         if not out:
@@ -230,7 +252,7 @@ def write_file(path: str, content: str) -> str:
         return format_result(False, str(e), error_type="io_error")
 
 
-def read_file(path: str, full_output: bool = False) -> str:
+def read_file(path: str, full_output: bool = True) -> str:
     try:
         p = safe_path(path)
         if not p.exists():
@@ -256,7 +278,7 @@ def read_file(path: str, full_output: bool = False) -> str:
         return format_result(False, str(e), error_type="io_error")
 
 
-def run_python_script(code: str, full_output: bool = False) -> str:
+def run_python_script(code: str, full_output: bool = True) -> str:
     """Run Python code with optional network guard."""
     try:
         if not code:
@@ -415,8 +437,8 @@ def github_read_file(
     repo_dir: str,
     file_path: str,
     max_chars: int = 4000,
-    lean_mode: bool = True,
-    full_output: bool = False,
+    lean_mode: bool = False,
+    full_output: bool = True,
     start_line: int = 1,
     end_line: int = 0,
 ) -> str:
@@ -476,7 +498,7 @@ def github_read_file(
         return format_result(False, str(e), error_type="io_error")
 
 
-def github_commit_push(repo_dir: str, message: str, branch: str = "", lean_mode: bool = True) -> str:
+def github_commit_push(repo_dir: str, message: str, branch: str = "", lean_mode: bool = False) -> str:
     try:
         repo_root = safe_path(repo_dir)
         message = str(message).strip()

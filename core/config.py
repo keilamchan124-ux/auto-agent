@@ -136,7 +136,7 @@ class Config:
 
     # ===== SECURITY =====
     ALLOWED_BINARIES = set(
-        os.getenv("ALLOWED_BINARIES", "python,python3,pip,pip3,ls,cat,echo,git").split(",")
+        os.getenv("ALLOWED_BINARIES", "python,python3,pip,pip3,ls,cat,echo,git,ls,dir,find,cat,echo,pwd,cd").split(",")
     )
     ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "*").split(",") if d.strip()]
 
