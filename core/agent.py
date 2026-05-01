@@ -29,6 +29,7 @@ class AgentState:
     error_count: int = 0
     loaded_skills: List[str] = field(default_factory=list)
     last_error: Optional[str] = None
+    plan_executed_count: int = 0
 
 class Agent:
     def __init__(self):
@@ -235,13 +236,14 @@ Task executed successfully.
 
     def should_force_rescue(self) -> bool:
         """
-        B + E:
-        - too many parse failures
-        - too many repeated actions
-        - too many repeated searches
+        Error-type specific recovery policies:
+        - 嚴重錯誤/工具參數 (error_count 被手動設為 >= 3): immediate
+        - 執行錯誤 (error_count >= 3): allow 2~3 retries, then rescue
+        - 格式錯誤 (parse_fail_count >= 2): handled inside loop
+        - 重複動作 (repeat_count >= 2)
+        - 搜尋迴圈 (search_count >= 4)
         """
-        # 工具參數錯誤要更快救援
-        if self.state.error_count >= 2:
+        if self.state.error_count >= 3:
             return True
         if self.state.parse_fail_count >= 2:
             return True
@@ -250,6 +252,33 @@ Task executed successfully.
         if self.state.search_count >= 4:
             return True
         return False
+
+    def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
+        """只有在以下條件全部滿足時才提早結束 (Success Heuristics)"""
+        if self.state.plan_executed_count < 1:
+            return False
+            
+        if self.state.error_count > 0 or self.state.last_error is not None:
+            return False
+            
+        if current_step < 5:
+            return False
+            
+        ignore_files = {"state.json", "execution_trace.jsonl", "todo.txt", ".antigravity"}
+        workspace_files = [f for f in Config.WORKSPACE_DIR.iterdir() if f.is_file() and f.name not in ignore_files]
+        artifacts_dir = Config.WORKSPACE_DIR / "artifacts"
+        if artifacts_dir.exists() and artifacts_dir.is_dir():
+            workspace_files.extend([f for f in artifacts_dir.iterdir() if f.is_file()])
+            
+        if len(workspace_files) < 1:
+            return False
+            
+        total_chars = sum(len(m.get("content", "")) for m in msgs)
+        if total_chars > 45000:
+            return False
+            
+        logger.info("✅ 成功啟發式條件滿足，提早結束任務 (Success Heuristics)")
+        return True
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
         """
@@ -280,14 +309,32 @@ Task executed successfully.
         except Exception:
             return {"ok": False, "message": str(raw)[:200], "error_type": "runtime_error"}
 
-    def _fix_plan_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        if "steps" not in kwargs:
-            for key in ["task", "plan", "goal", "input", "task_breakdown"]:
+    def _auto_fix_kwargs(self, action: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Auto-rewrite kwargs once locally for known schema mistakes (One-shot repair)."""
+        original_kwargs = kwargs.copy()
+        fixed = False
+        
+        if action == "plan" and "steps" not in kwargs:
+            for key in ["task", "plan", "goal", "input", "task_breakdown", "tasks"]:
                 if key in kwargs:
-                    kwargs["steps"] = str(kwargs.pop(key))
+                    val = kwargs.pop(key)
+                    kwargs["steps"] = "\n".join([str(t) for t in val]) if isinstance(val, list) else str(val)
+                    fixed = True
                     break
-            if "tasks" in kwargs and isinstance(kwargs.get("tasks"), list):
-                kwargs["steps"] = "\n".join([str(t) for t in kwargs.pop("tasks")])
+        elif action == "get_skill" and "skill_name" not in kwargs:
+            for key in ["name", "skill"]:
+                if key in kwargs:
+                    kwargs["skill_name"] = str(kwargs.pop(key))
+                    fixed = True
+                    break
+        elif action == "run_cmd" and "cmd" not in kwargs:
+            if "command" in kwargs:
+                kwargs["cmd"] = str(kwargs.pop("command"))
+                fixed = True
+                
+        if fixed:
+            logger.info("🔧 Auto-fixed %s parameters (one-shot repair): %s -> %s", action, original_kwargs, kwargs)
+            
         return kwargs
 
     def _summarize_skill(self, skill_name: str, full_content: str) -> str:
@@ -464,6 +511,18 @@ Task executed successfully.
                     # === 第二階段：真的修復不了才呼叫 Gemini ===
                     logger.warning("⚠️ 本地修復失敗，呼叫 Gemini rescue...")
                     
+                    # Determine stuck reason for better rescue prompt
+                    stuck_reason = "Unknown stuck reason."
+                    if self.state.error_count >= 3:
+                        if self.state.last_error and ("missing" in str(self.state.last_error).lower() or "unexpected keyword" in str(self.state.last_error).lower() or "not found" in str(self.state.last_error).lower()):
+                            stuck_reason = f"TOOL PARAMETER ERROR: {self.state.last_error}"
+                        else:
+                            stuck_reason = f"RUNTIME ERROR: {self.state.last_error}"
+                    elif self.state.repeat_count >= 2:
+                        stuck_reason = f"REPEATING ACTION LOOP: Repeated {self.state.last_action} {self.state.repeat_count} times."
+                    elif self.state.search_count >= 4:
+                        stuck_reason = "SEARCH LOOP: Performed too many consecutive web searches."
+
                     # === 新增：強制 Agent 總結錯誤 ===
                     error_summary_prompt = (
                         "你剛剛執行了一個錯誤的動作。\n"
@@ -481,7 +540,7 @@ Task executed successfully.
                     try:
                         rescue_text = llm.call_gemini_rescue(
                             self.trim_history(msgs), 
-                            stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.'
+                            stuck_reason=stuck_reason
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
@@ -529,7 +588,7 @@ Task executed successfully.
                     try:
                         rescue_text = llm.call_gemini_rescue(
                             self.trim_history(msgs), 
-                            stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.'
+                            stuck_reason="FORMAT ERROR: Agent failed to return valid JSON multiple times."
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
@@ -556,8 +615,7 @@ Task executed successfully.
             if not isinstance(kwargs, dict):
                 kwargs = {}
 
-            if action == "plan":
-                kwargs = self._fix_plan_kwargs(kwargs)
+            kwargs = self._auto_fix_kwargs(action, kwargs)
 
             # repeat guard
             self.update_repeat_guard(action)
@@ -607,6 +665,9 @@ Task executed successfully.
                         # 避免 context 雙重爆大，將 data 清空
                         res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
                         
+                if action == "plan" and res_data.get("ok", False):
+                    self.state.plan_executed_count += 1
+
             except Exception as e:
                 res_data = {
                     "ok": False,
@@ -615,14 +676,17 @@ Task executed successfully.
                 }
 
             if not res_data.get("ok", False):
-                self.state.error_count += 1
                 self.state.last_error = str(res_data.get("message", ""))
                 
-                # === 新增：工具參數錯誤專屬處理 ===
                 error_msg = res_data.get("message", "")
-                if "missing 1 required positional argument" in error_msg or "missing" in error_msg:
-                    logger.warning("🔧 偵測到工具參數錯誤，強制觸發 Gemini Rescue")
+                error_type = res_data.get("error_type", "")
+                
+                # === Error-type specific recovery policies ===
+                if error_type == "tool_not_found" or "missing" in error_msg.lower() or "unexpected keyword" in error_msg.lower():
+                    logger.warning("🚨 偵測到嚴重/工具參數錯誤，立即觸發 Rescue")
                     self.state.error_count = 3  # 直接拉高到觸發門檻
+                else:
+                    self.state.error_count += 1  # 執行期錯誤允許重試 2~3 次
             else:
                 self.state.error_count = 0
                 self.state.last_error = None
@@ -632,6 +696,11 @@ Task executed successfully.
             self.append_trace(action, kwargs, res_data)
 
             logger.info("🛠️ %s executed. ok=%s", action, res_data.get("ok", False))
+
+            # === Success Heuristics + Early Stop ===
+            if self.should_early_stop(msgs, step):
+                self._write_antigravity_report(task, True, step)
+                break
 
         else:
             logger.warning("Max steps reached.")

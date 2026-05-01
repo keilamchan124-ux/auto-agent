@@ -55,31 +55,36 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
     Gemini acts as a rescue supervisor.
     Output must be a single fenced JSON block.
     """
-    rescue_prompt = (
-        "You are a rescue controller for an execution agent.\n"
-        "The agent is currently stuck because of TOOL PARAMETER ERROR.\n"
-        "If the error mentions 'missing 1 required positional argument: steps',\n"
-        "you MUST force the agent to call the plan tool with EXACT format:\n"
-        '{"action":"plan","kwargs":{"steps":"your plan here as string"}}\n'
-        "Never use task, goal, plan, subtasks, or input as the key.\n"
-        "Only use 'steps' as the key.\n\n"
-        "Return ONLY one fenced JSON block.\n"
+    rescue_prompt = "You are a rescue controller for an execution agent.\n"
+
+    if stuck_reason:
+        rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
+        
+        if "FORMAT" in stuck_reason or "JSON" in stuck_reason:
+            rescue_prompt += (
+                "\nCRITICAL INSTRUCTION: You MUST return exactly one fenced JSON block containing `action` and `kwargs`.\n"
+                "Do NOT include any markdown, thoughts, or text outside the ```json ... ``` block.\n"
+            )
+        elif "TOOL PARAMETER" in stuck_reason:
+            rescue_prompt += (
+                "\nCRITICAL INSTRUCTION: The agent provided invalid parameters for the tool.\n"
+                "If using the 'plan' tool, use EXACTLY:\n"
+                '{"action":"plan","kwargs":{"steps":"your plan here"}}\n'
+                "Do NOT use task, goal, plan, subtasks, or input as keys.\n"
+                "If using other tools, provide only the required parameters.\n"
+            )
+        else:
+            rescue_prompt += (
+                "\nCRITICAL INSTRUCTION: Analyze the runtime or execution error.\n"
+                "Choose a different strategy, try installing missing dependencies, or write a different command.\n"
+            )
+    
+    rescue_prompt += (
+        "\nReturn ONLY one fenced JSON block.\n"
         "No explanation. No markdown outside the JSON block. No thoughts.\n"
         "Choose the single best next action to debug errors or recover from loop/format failure.\n"
         "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, get_skill, plan, mark_done.\n"
-        "Note: Use run_cmd with 'pip install <pkg>' if you need third-party packages.\n"
-    )
-    if stuck_reason:
-        rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
-    
-    rescue_prompt += (
-        "IMPORTANT: If the previous error mentions \"missing 1 required positional argument: 'steps'\",\n"
-        "you MUST call the plan tool again using EXACTLY this format:\n"
-        "{\"action\":\"plan\",\"kwargs\":{\"steps\":\"your plan here\"}}\n"
-        "Do NOT use task, goal, plan, or subtasks as the key.\n"
-    )
-    
-    rescue_prompt += (
+        "Note: Use run_cmd with 'pip install <pkg>' if you need third-party packages.\n\n"
         "Use this exact format:\n"
         "```json\n"
         "{\"action\":\"run_python_script\",\"kwargs\":{\"code\":\"print('Debugging...')\"}}\n"
