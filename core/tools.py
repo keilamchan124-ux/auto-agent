@@ -12,7 +12,7 @@ from typing import Any, Dict
 import requests
 from ddgs import DDGS
 
-from config import Config
+from core.config import Config
 
 logger = logging.getLogger("Tools")
 

@@ -9,9 +9,9 @@ from dataclasses import dataclass, asdict
 import json_repair
 
 
-from config import Config
-import llm
-import tools
+from core.config import Config
+from core import llm
+from core import tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")

@@ -1,5 +1,5 @@
 @echo off
-title 🤖 Agent V4.0 Keep-Alive Server
+title 🤖 Agent V7.2 Keep-Alive Server
 color 0A
 
 rem ==========================================
@@ -13,7 +13,7 @@ echo.
 echo ==========================================
 echo [System] %date% %time% - Starting Agent...
 echo ==========================================
-python agent.py
+python main.py
 
 rem ==========================================
 rem 🛡️ Status Check Area

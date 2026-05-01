@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 
 from openai import OpenAI
 from google import genai
-from config import Config
+from core.config import Config
 
 logger = logging.getLogger("LLM")
 
