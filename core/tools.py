@@ -362,6 +362,72 @@ def plan(steps: str) -> str:
         return format_result(False, str(e), error_type="execution_error")
 
 
+def list_skills(query: str = "") -> str:
+    """
+    列出所有可用技能，支援關鍵字過濾。
+    讓 Agent 可以主動「探索」有哪些技能可用，再決定載入哪些。
+    """
+    try:
+        skills_dir = Config.SKILLS_DIR
+        if not skills_dir.exists():
+            return format_result(False, "Skills directory not found.", error_type="not_found")
+
+        query_lower = str(query).strip().lower()
+        skill_tags = getattr(Config, "SKILL_TAGS", {})
+        skills = []
+
+        for skill_dir in sorted(skills_dir.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+
+            skill_name = skill_dir.name
+            skill_file = skill_dir / "SKILL.md"
+
+            # 從 SKILL_TAGS 取得描述和關鍵字
+            tag_info = skill_tags.get(skill_name, {})
+            description = tag_info.get("description", "")
+            keywords = tag_info.get("keywords", [])
+
+            # 如果 SKILL_TAGS 沒有描述，嘗試從 SKILL.md 讀前 200 字
+            if not description and skill_file.exists():
+                try:
+                    raw = skill_file.read_text(encoding="utf-8", errors="replace")[:300]
+                    # 取第一段非空行作為描述
+                    for line in raw.split("\n"):
+                        line = line.strip().strip("#").strip("-").strip()
+                        if line and len(line) > 10:
+                            description = line[:200]
+                            break
+                except Exception:
+                    description = "(no description)"
+
+            # 如果有 query，做簡單的關鍵字過濾
+            if query_lower:
+                name_match = query_lower in skill_name.lower()
+                desc_match = query_lower in description.lower()
+                kw_match = any(query_lower in kw for kw in keywords)
+                if not (name_match or desc_match or kw_match):
+                    continue
+
+            skills.append({
+                "name": skill_name,
+                "description": description,
+                "keywords": keywords[:5],  # 只返回前 5 個關鍵字以節省 context
+                "has_skill_file": skill_file.exists(),
+            })
+
+        if not skills:
+            return format_result(True, f"No skills found matching '{query}'.", data={"skills": [], "total": 0})
+
+        return format_result(
+            True,
+            f"Found {len(skills)} skills" + (f" matching '{query}'" if query_lower else "") + ".",
+            data={"skills": skills, "total": len(skills)}
+        )
+    except Exception as e:
+        return format_result(False, f"Failed to list skills: {e}", error_type="runtime_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
@@ -371,6 +437,7 @@ TOOLS_REGISTRY = {
     "run_python_script": run_python_script,
     "get_skill": get_skill,
     "load_preset": load_preset,
+    "list_skills": list_skills,
     "plan": plan,
     "git_commit": git_commit,
     "browse_page": browse_page,

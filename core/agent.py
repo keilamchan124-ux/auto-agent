@@ -4,8 +4,8 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Optional, Tuple, Set
+from dataclasses import dataclass, asdict, field
 import json_repair
 
 
@@ -26,6 +26,7 @@ class AgentState:
     search_count: int = 0
     hard_reset_count: int = 0
     error_count: int = 0
+    loaded_skills: List[str] = field(default_factory=list)
 
 class Agent:
     def __init__(self):
@@ -224,6 +225,113 @@ Task executed successfully.
         except Exception:
             return {"ok": False, "message": str(raw)[:200], "error_type": "runtime_error"}
 
+    def _summarize_skill(self, skill_name: str, full_content: str) -> str:
+        """
+        方案 A：精簡注入 (Skill Lean Injection)
+        把原本動輒數千字的技能說明，濃縮到指定字數內，保留最重要規則。
+        """
+        max_chars = getattr(Config, "SKILL_SUMMARY_MAX_CHARS", 600)
+        if len(full_content) <= max_chars:
+            return full_content
+            
+        # 嘗試保留大綱和重點
+        lines = full_content.split('\n')
+        summary = []
+        current_length = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped: continue
+            
+            # 優先保留標題 (##) 和重點列表 (-)
+            if stripped.startswith("#") or stripped.startswith("-") or stripped.startswith("*"):
+                summary.append(line)
+                current_length += len(line)
+            elif current_length < max_chars // 2: # 保留開頭的簡介段落
+                summary.append(line)
+                current_length += len(line)
+                
+            if current_length >= max_chars:
+                summary.append("...(已截斷，詳情已省略以節省 Context，請遵循上述核心原則)")
+                break
+                
+        if not summary:
+            return full_content[:max_chars] + "...\n(已截斷)"
+            
+        return "\n".join(summary)
+
+    # ---------- Auto Skill Router (Layer 3) ----------
+    def _auto_select_skills(self, task: str, max_skills: int = 4) -> List[str]:
+        """
+        規則式技能路由：根據任務文本的關鍵字匹配，自動選擇最相關的 2~4 個技能。
+        用簡單的 keyword scoring —— 零成本、零延遲、不需要額外 API call。
+        """
+        task_lower = task.lower()
+        skill_tags = getattr(Config, "SKILL_TAGS", {})
+
+        scores: Dict[str, int] = {}
+        for skill_name, info in skill_tags.items():
+            keywords = info.get("keywords", [])
+            score = 0
+            for kw in keywords:
+                if kw in task_lower:
+                    # 多字關鍵字給更高分
+                    score += 2 if " " in kw else 1
+            if score > 0:
+                scores[skill_name] = score
+
+        if not scores:
+            # 預設：複雜任務至少給一個規劃技能
+            return ["planning-and-task-breakdown"]
+
+        # 按分數降序，取前 max_skills 個
+        sorted_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        selected = [name for name, _ in sorted_skills[:max_skills]]
+
+        # 確保至少 2 個：如果只有 1 個，參考 SKILL_PRESETS 補充
+        if len(selected) == 1:
+            presets = getattr(Config, "SKILL_PRESETS", {})
+            for preset_skills in presets.values():
+                if selected[0] in preset_skills:
+                    for s in preset_skills:
+                        if s not in selected:
+                            selected.append(s)
+                            break
+                    break
+
+        return selected[:max_skills]
+
+    def _preload_skills(self, skill_names: List[str], msgs: List[Dict[str, str]]) -> List[str]:
+        """
+        預載入選定的技能到 System Prompt 中，讓 Agent 從第一步就擁有相關知識。
+        回傳成功載入的技能名稱。
+        """
+        loaded = []
+        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 4)
+        for skill_name in skill_names:
+            if len(self.state.loaded_skills) >= max_skills:
+                logger.info("⚠️ Skill budget reached, skipping auto-load for %s", skill_name)
+                break
+                
+            try:
+                result_raw = tools.execute_tool("get_skill", {"skill_name": skill_name})
+                result = json.loads(result_raw)
+                if result.get("ok") and "data" in result:
+                    skill_content = result["data"].get("content", "")
+                    if skill_content:
+                        if skill_name not in self.state.loaded_skills:
+                            self.state.loaded_skills.append(skill_name)
+                        summarized = self._summarize_skill(skill_name, skill_content)
+                        msgs[0]["content"] += f"\n\n[AUTO-LOADED SKILL: {skill_name}]\n{summarized}"
+                        loaded.append(skill_name)
+                        logger.info("📦 Auto-loaded skill: %s", skill_name)
+            except Exception as e:
+                logger.warning("⚠️ Failed to auto-load skill '%s': %s", skill_name, e)
+
+        if loaded:
+            self.save_state()
+        return loaded
+
     # ---------- Main loop ----------
     def run_task(self, task: str):
         self.reset_counters()
@@ -235,6 +343,19 @@ Task executed successfully.
             },
             {"role": "user", "content": task}
         ]
+
+        # === Layer 3: 自動技能路由 ===
+        selected_skills = self._auto_select_skills(task)
+        loaded_skills = self._preload_skills(selected_skills, msgs)
+        if loaded_skills:
+            logger.info("🎯 Auto-loaded %d skills: %s", len(loaded_skills), loaded_skills)
+            # 告訴 Agent 哪些技能已經預載，避免重複載入
+            msgs[0]["content"] += (
+                f"\n\n[AUTO-ROUTED] The following skills were pre-loaded based on task analysis: "
+                f"{', '.join(loaded_skills)}. You may skip list_skills/get_skill for these."
+            )
+        else:
+            logger.info("ℹ️ No skills auto-loaded. Agent will discover on its own.")
 
         max_steps = getattr(Config, "MAX_STEPS", 25)
 
@@ -336,9 +457,20 @@ Task executed successfully.
                 if action in ["get_skill", "load_preset"] and res_data.get("ok") and "data" in res_data:
                     skill_content = res_data["data"].get("content", "")
                     if skill_content:
-                        msgs[0]["content"] += f"\n\n[LOADED SKILL/PRESET]\n{skill_content}"
-                        # 避免 context 雙重爆大，將 data 清空
-                        res_data["data"] = {"status": "Successfully injected into SYSTEM PROMPT."}
+                        target_name = res_data["data"].get("skill_name") or res_data["data"].get("preset") or action
+                        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 4)
+                        
+                        if len(self.state.loaded_skills) >= max_skills and target_name not in self.state.loaded_skills:
+                            res_data["data"] = {"status": f"Failed: Skill budget exceeded (max {max_skills}). Please plan without this skill or restart task."}
+                        else:
+                            if target_name not in self.state.loaded_skills:
+                                self.state.loaded_skills.append(target_name)
+                                self.save_state()
+                                
+                            summarized = self._summarize_skill(target_name, skill_content)
+                            msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
+                            # 避免 context 雙重爆大，將 data 清空
+                            res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
                         
             except Exception as e:
                 res_data = {

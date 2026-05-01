@@ -4,7 +4,7 @@
 
 ## 📌 Project Overview
 
-**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It acts as an "Executor" — reads tasks from `todo.txt`, plans, searches the web, browses pages, runs terminal commands, executes Python scripts, and self-repairs errors. It supports dual-model architecture (Mimo + Gemini rescue), lazy-loaded engineering skills, Telegram bot remote control, and Antigravity ecosystem integration.
+**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It acts as an "Executor" — reads tasks from `todo.txt`, plans, searches the web, browses pages, runs terminal commands, executes Python scripts, and self-repairs errors. It supports dual-model architecture (Mimo + Gemini rescue), **proactive skill discovery with auto-routing**, lazy-loaded engineering skills, Telegram bot remote control, and Antigravity ecosystem integration.
 
 ---
 
@@ -24,13 +24,13 @@
 │   ├── state.json           # Persistent counters (parse fails, repeat counts) survive restarts.
 │   ├── execution_trace.jsonl# Append-only log of all actions taken and their results.
 │   └── artifacts/           # Agent writes execution reports here.
-├── .agents/skills/          # Addy Osmani's agent-skills collection (SKILL.md files).
+├── .agents/skills/          # Addy Osmani's agent-skills collection (SKILL.md files). 22 skills.
 └── core/                    # Core backend logic package
     ├── __init__.py
-    ├── agent.py             # Main execution loop, history management, state persistence.
-    ├── config.py            # Centralized configuration, System Prompt, env var loading.
+    ├── agent.py             # Main execution loop, auto skill router, history management, state.
+    ├── config.py            # Config, System Prompt, SKILL_PRESETS, SKILL_TAGS for routing.
     ├── llm.py               # API wrappers (Mimo for execution, Gemini for rescue).
-    └── tools.py             # Tool implementations and registry (12 tools).
+    └── tools.py             # Tool implementations and registry (13 tools incl. list_skills).
 ```
 
 ---
@@ -54,7 +54,7 @@
 - Handles broken/malformed LLM outputs gracefully.
 
 ### 5. Tools Engine (`core/tools.py`)
-12 registered tools with strict schema constraints:
+13 registered tools with strict schema constraints:
 
 | Tool | Description |
 |------|-------------|
@@ -65,22 +65,49 @@
 | `write_file` | Write to workspace (sandboxed). |
 | `read_file` | Read from workspace (sandboxed). |
 | `run_python_script` | Executes Python code. Optional domain-level network guard. |
+| `list_skills` | **NEW** — Lists all available skills with descriptions + keyword filtering. |
 | `get_skill` | Lazy-loads a single skill from `.agents/skills/<name>/SKILL.md`. |
 | `load_preset` | Loads a preset skill combo (e.g. `frontend`, `backend`, `debug`). |
 | `plan` | Records a plan for the agent's next steps. |
 | `git_commit` | Runs `git add . && git commit -m <msg>`. |
 | `mark_done` | Signals task completion. Writes execution report. |
 
-### 6. Skill Injection
-When `get_skill` or `load_preset` succeeds, the skill content is injected directly into the System Prompt (`msgs[0]`) to prevent it from being discarded during history trimming.
+### 6. Proactive Skill System (Three-Layer Architecture)
 
-### 7. Telegram Bot (`telegram_bot.py`)
+#### Layer 1: Thinking-First System Prompt
+The System Prompt instructs the agent to follow a mandatory workflow:
+1. **THINK** → Analyze task domain and complexity
+2. **DISCOVER** → Call `list_skills` to explore available skills
+3. **LOAD** → Use `get_skill` (2-4 times) to load relevant skills
+4. **PLAN** → Outline execution steps
+5. **EXECUTE** → Carry out the plan
+6. **FINISH** → Call `mark_done`
+
+#### Layer 2: `list_skills` Tool
+- Scans `.agents/skills/` directory for all available skills
+- Returns name, description, keywords, and file availability for each skill
+- Supports keyword filtering via `query` parameter
+- Uses `SKILL_TAGS` from config for rich metadata
+
+#### Layer 3: Auto Skill Router (`agent.py`)
+- `_auto_select_skills(task)`: Rule-based keyword scoring against `SKILL_TAGS`
+  - Multi-word keywords score higher (2 points vs 1)
+  - Selects top 2-4 skills by score
+  - Falls back to `planning-and-task-breakdown` if no keywords match
+  - Supplements from `SKILL_PRESETS` if only 1 skill matches
+- `_preload_skills(skills, msgs)`: Loads selected skills into System Prompt before loop starts
+- Notifies agent which skills are pre-loaded to avoid redundant discovery
+
+### 7. Skill Injection
+When `get_skill` or `load_preset` succeeds (whether called manually by agent or auto-loaded by router), the skill content is injected directly into the System Prompt (`msgs[0]`) to prevent it from being discarded during history trimming.
+
+### 8. Telegram Bot (`telegram_bot.py`)
 - Remote task submission via Telegram messages.
 - Commands: `/start`, `/status`, `/report`.
 - Auth: `TELEGRAM_ALLOWED_USER_ID` env var restricts access to a single user.
 - Writes tasks to `todo.txt`, which the main agent loop picks up.
 
-### 8. Antigravity Mode
+### 9. Antigravity Mode
 - Detected via `ANTIGRAVITY_MODE=1` env var or `.antigravity` folder in workspace.
 - Enables: mandatory artifact generation, terminal review policies, SKILL.md best practices.
 
