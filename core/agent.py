@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import shutil
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict, field
 import json_repair
@@ -27,10 +28,14 @@ class AgentState:
     hard_reset_count: int = 0
     error_count: int = 0
     loaded_skills: List[str] = field(default_factory=list)
+    last_error: Optional[str] = None
 
 class Agent:
     def __init__(self):
         self.state_file = Config.WORKSPACE_DIR / "state.json"
+        self.current_task_id = None
+        self.current_step = 0
+        self.rescue_cooldown = 0
         self.load_state()
 
     def load_state(self):
@@ -43,12 +48,51 @@ class Agent:
                 logger.warning(f"Failed to load state: {e}")
         self.state = AgentState()
 
+    def _try_local_repair(self) -> bool:
+        """嘗試本地修復，不呼叫 Gemini"""
+        last_action = self.state.last_action
+        
+        # 針對常見錯誤的本地修復
+        if last_action == "plan":
+            if "missing" in str(self.state.last_error).lower():
+                logger.info("🔧 偵測到 plan 參數錯誤，嘗試本地修正")
+                return True
+        
+        if last_action == "get_skill":
+            if "missing" in str(self.state.last_error).lower():
+                logger.info("🔧 偵測到 get_skill 參數錯誤，嘗試本地修正")
+                return True
+        
+        return False
+
+    def _simple_fallback_plan(self) -> str:
+        """當 Gemini 無法使用時的簡單 fallback"""
+        return """```json\n{"action":"plan","kwargs":{"steps":"1. 分析剛剛的錯誤\\n2. 使用正確的參數格式重試\\n3. 如果還是失敗，嘗試其他方法或跳過此步驟"}}\n```"""
+
     def save_state(self):
         self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
 
     def reset_counters(self):
         self.state = AgentState()
         self.save_state()
+
+    def _clean_workspace(self):
+        """清理 workspace，只保留重要檔案"""
+        important_files = {"state.json", "execution_trace.jsonl", "todo.txt"}
+        
+        for item in Config.WORKSPACE_DIR.iterdir():
+            if item.is_file() and item.name not in important_files:
+                try:
+                    item.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to delete {item.name}: {e}")
+            elif item.is_dir():
+                # 刪除臨時資料夾，保留 artifacts 及隱藏目錄
+                if item.name not in {"artifacts", ".agents", ".antigravity"}:
+                    try:
+                        shutil.rmtree(item)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete dir {item.name}: {e}")
 
     def _write_antigravity_report(self, task: str, success: bool, steps: int):
         report_path = Config.WORKSPACE_DIR / "artifacts" / "agent_execution_report.md"
@@ -69,8 +113,18 @@ Task executed successfully.
 
     def append_trace(self, action: str, kwargs: dict, result: dict):
         trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
+        
+        trace_entry = {
+            "task_id": self.current_task_id or "unknown",
+            "step": self.current_step,
+            "time": time.time(), 
+            "action": action, 
+            "kwargs": kwargs, 
+            "result": result
+        }
+        
         with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"time": time.time(), "action": action, "kwargs": kwargs, "result": result}, ensure_ascii=False) + "\n")
+            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
             
     # ---------- Context / History ----------
 
@@ -186,13 +240,14 @@ Task executed successfully.
         - too many repeated actions
         - too many repeated searches
         """
+        # 工具參數錯誤要更快救援
+        if self.state.error_count >= 2:
+            return True
         if self.state.parse_fail_count >= 2:
             return True
-        if self.state.repeat_count >= 3:
+        if self.state.repeat_count >= 2:
             return True
         if self.state.search_count >= 4:
-            return True
-        if self.state.error_count >= 2:
             return True
         return False
 
@@ -224,6 +279,16 @@ Task executed successfully.
             return res
         except Exception:
             return {"ok": False, "message": str(raw)[:200], "error_type": "runtime_error"}
+
+    def _fix_plan_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if "steps" not in kwargs:
+            for key in ["task", "plan", "goal", "input", "task_breakdown"]:
+                if key in kwargs:
+                    kwargs["steps"] = str(kwargs.pop(key))
+                    break
+            if "tasks" in kwargs and isinstance(kwargs.get("tasks"), list):
+                kwargs["steps"] = "\n".join([str(t) for t in kwargs.pop("tasks")])
+        return kwargs
 
     def _summarize_skill(self, skill_name: str, full_content: str) -> str:
         """
@@ -307,11 +372,18 @@ Task executed successfully.
         回傳成功載入的技能名稱。
         """
         loaded = []
-        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 4)
+        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
         for skill_name in skill_names:
+            # === 新增：動態保護 ===
+            current_context_size = sum(len(m.get("content", "")) for m in msgs)
+            if current_context_size > 45000:   # 當 context 超過 45k 時強制 offload
+                if self.state.loaded_skills:
+                    oldest = self.state.loaded_skills.pop(0)
+                    logger.warning(f"⚠️ Context 過大，強制 offload: {oldest}")
+
             if len(self.state.loaded_skills) >= max_skills:
-                logger.info("⚠️ Skill budget reached, skipping auto-load for %s", skill_name)
-                break
+                oldest_skill = self.state.loaded_skills.pop(0)
+                logger.info("🔄 Offloading oldest skill: %s", oldest_skill)
                 
             try:
                 result_raw = tools.execute_tool("get_skill", {"skill_name": skill_name})
@@ -335,6 +407,8 @@ Task executed successfully.
     # ---------- Main loop ----------
     def run_task(self, task: str):
         self.reset_counters()
+        self._clean_workspace()
+        self.current_task_id = f"task_{int(time.time())}"
 
         msgs: List[Dict[str, str]] = [
             {
@@ -360,6 +434,7 @@ Task executed successfully.
         max_steps = getattr(Config, "MAX_STEPS", 25)
 
         for step in range(1, max_steps + 1):
+            self.current_step = step
             logger.info("🧠 Step %s/%s", step, max_steps)
 
             # E: if too stuck, hard reset once
@@ -370,21 +445,66 @@ Task executed successfully.
             need_rescue = self.should_force_rescue()
 
             if need_rescue:
-                logger.warning("🆘 Agent stuck. Calling Gemini for rescue...")
-                rescue_text = llm.call_gemini_rescue(self.trim_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
-                parsed = self.extract_json(rescue_text)
-
-                self.state.parse_fail_count = 0
-                self.state.repeat_count = 0
-                self.state.search_count = 0
-                self.state.error_count = 0
-
-                if not parsed:
+                if self.rescue_cooldown > 0:
+                    self.rescue_cooldown -= 1
+                    need_rescue = False
+                else:
+                    logger.warning("🆘 Agent stuck. Trying local repair first...")
+                    
+                    # === 第一階段：本地修復（不呼叫 Gemini）===
+                    local_repair_success = self._try_local_repair()
+                    
+                    if local_repair_success:
+                        logger.info("✅ 本地修復成功，跳過 Gemini")
+                        self.state.error_count = 0
+                        self.state.repeat_count = 0
+                        self.rescue_cooldown = 1
+                        continue
+                    
+                    # === 第二階段：真的修復不了才呼叫 Gemini ===
+                    logger.warning("⚠️ 本地修復失敗，呼叫 Gemini rescue...")
+                    
+                    # === 新增：強制 Agent 總結錯誤 ===
+                    error_summary_prompt = (
+                        "你剛剛執行了一個錯誤的動作。\n"
+                        f"錯誤原因：{self.state.last_action} 失敗。\n"
+                        "請用一句話總結你剛剛犯了什麼錯，以及下次應該怎麼做。\n"
+                        "格式：{\"action\":\"plan\",\"kwargs\":{\"steps\":\"我剛剛的錯誤是...，下次我會...\"}}"
+                    )
+                    
+                    # 把錯誤總結要求加入歷史
                     msgs.append({
                         "role": "user",
-                        "content": "RESCUE ERROR: return exactly one fenced JSON block."
+                        "content": error_summary_prompt
                     })
-                    continue
+                    
+                    try:
+                        rescue_text = llm.call_gemini_rescue(
+                            self.trim_history(msgs), 
+                            stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.'
+                        )
+                    except Exception as e:
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            rescue_text = self._simple_fallback_plan()
+                        else:
+                            raise e
+
+                    self.rescue_cooldown = 3   # 呼叫一次 rescue 後，接下來 3 步都不再呼叫
+                    
+                    parsed = self.extract_json(rescue_text)
+
+                    self.state.parse_fail_count = 0
+                    self.state.repeat_count = 0
+                    self.state.search_count = 0
+                    self.state.error_count = 0
+
+                    if not parsed:
+                        msgs.append({
+                            "role": "user",
+                            "content": "RESCUE ERROR: return exactly one fenced JSON block."
+                        })
+                        continue
             else:
                 resp = llm.call_mimo(self.trim_history(msgs))
                 content = resp.get("content", "")
@@ -406,7 +526,18 @@ Task executed successfully.
                     })
                 else:
                     logger.warning("🆘 Too many format failures, forcing rescue...")
-                    rescue_text = llm.call_gemini_rescue(self.trim_history(msgs), stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.')
+                    try:
+                        rescue_text = llm.call_gemini_rescue(
+                            self.trim_history(msgs), 
+                            stuck_reason=f'Repeating {self.state.last_action} {self.state.repeat_count} times.'
+                        )
+                    except Exception as e:
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            rescue_text = self._simple_fallback_plan()
+                        else:
+                            raise e
+
                     parsed = self.extract_json(rescue_text)
                     self.state.parse_fail_count = 0
                     self.state.repeat_count = 0
@@ -424,6 +555,9 @@ Task executed successfully.
             kwargs = parsed.get("kwargs", {})
             if not isinstance(kwargs, dict):
                 kwargs = {}
+
+            if action == "plan":
+                kwargs = self._fix_plan_kwargs(kwargs)
 
             # repeat guard
             self.update_repeat_guard(action)
@@ -458,19 +592,20 @@ Task executed successfully.
                     skill_content = res_data["data"].get("content", "")
                     if skill_content:
                         target_name = res_data["data"].get("skill_name") or res_data["data"].get("preset") or action
-                        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 4)
+                        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
                         
                         if len(self.state.loaded_skills) >= max_skills and target_name not in self.state.loaded_skills:
-                            res_data["data"] = {"status": f"Failed: Skill budget exceeded (max {max_skills}). Please plan without this skill or restart task."}
-                        else:
-                            if target_name not in self.state.loaded_skills:
-                                self.state.loaded_skills.append(target_name)
-                                self.save_state()
-                                
-                            summarized = self._summarize_skill(target_name, skill_content)
-                            msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
-                            # 避免 context 雙重爆大，將 data 清空
-                            res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
+                            oldest_skill = self.state.loaded_skills.pop(0)
+                            logger.info("🔄 Offloading oldest skill: %s", oldest_skill)
+
+                        if target_name not in self.state.loaded_skills:
+                            self.state.loaded_skills.append(target_name)
+                            self.save_state()
+                            
+                        summarized = self._summarize_skill(target_name, skill_content)
+                        msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
+                        # 避免 context 雙重爆大，將 data 清空
+                        res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
                         
             except Exception as e:
                 res_data = {
@@ -481,8 +616,16 @@ Task executed successfully.
 
             if not res_data.get("ok", False):
                 self.state.error_count += 1
+                self.state.last_error = str(res_data.get("message", ""))
+                
+                # === 新增：工具參數錯誤專屬處理 ===
+                error_msg = res_data.get("message", "")
+                if "missing 1 required positional argument" in error_msg or "missing" in error_msg:
+                    logger.warning("🔧 偵測到工具參數錯誤，強制觸發 Gemini Rescue")
+                    self.state.error_count = 3  # 直接拉高到觸發門檻
             else:
                 self.state.error_count = 0
+                self.state.last_error = None
 
             # D: compact result back to context
             self.append_clean_result(msgs, res_data)

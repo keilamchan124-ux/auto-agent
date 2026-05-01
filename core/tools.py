@@ -350,16 +350,27 @@ def git_commit(message: str) -> str:
         return format_result(False, str(e), error_type="git_error")
 
 
-def plan(steps: str) -> str:
+def plan(steps: str | list | dict = None, **kwargs) -> str:
     """
     允許 Agent 輸出計畫，並將計畫記錄下來。
+    接受多種格式的規劃輸入，自動正規化成字串。
     """
     try:
-        if not steps:
-            return format_result(False, "Plan steps are empty.", error_type="execution_error")
-        return format_result(True, f"Plan recorded:\n{_truncate(str(steps), 2000)}")
+        if isinstance(steps, (list, dict)):
+            # 自動轉成易讀文字
+            if isinstance(steps, list):
+                content = "\n".join([str(s) for s in steps])
+            else:
+                content = str(steps)
+        elif isinstance(steps, str):
+            content = steps
+        else:
+            # 嘗試從 kwargs 組合
+            content = str(kwargs.get("task") or kwargs.get("plan") or kwargs.get("goal") or "No plan content")
+        
+        return format_result(True, f"Plan recorded:\n{_truncate(content, 2000)}")
     except Exception as e:
-        return format_result(False, str(e), error_type="execution_error")
+        return format_result(False, str(e), error_type="plan_error")
 
 
 def list_skills(query: str = "") -> str:
@@ -464,10 +475,21 @@ def execute_tool(action: str, kwargs: dict) -> str:
         "query": "q",
         "search_term": "q",
         "filepath": "path",
+        "command": "cmd",
+        "plan": "steps",
+        "task": "steps",
+        "goal": "steps",
+        "tasks": "steps",
+        "input": "steps",
     }
 
     normalized = {alias_map.get(k, k): v for k, v in kwargs.items()}
-    valid_kwargs = {k: v for k, v in normalized.items() if k in sig.parameters}
+    
+    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if has_varkw:
+        valid_kwargs = normalized
+    else:
+        valid_kwargs = {k: v for k, v in normalized.items() if k in sig.parameters}
 
     try:
         return func(**valid_kwargs)

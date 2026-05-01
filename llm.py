@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+# -*- coding: utf-8 -*-
 import time
 import logging
 from typing import List, Dict, Any
 
 from openai import OpenAI
 from google import genai
-from core.config import Config
+from config import Config
 
 logger = logging.getLogger("LLM")
 
@@ -71,13 +71,6 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
     )
     if stuck_reason:
         rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
-    
-    rescue_prompt += (
-        "IMPORTANT: If the previous error mentions \"missing 1 required positional argument: 'steps'\",\n"
-        "you MUST call the plan tool again using EXACTLY this format:\n"
-        "{\"action\":\"plan\",\"kwargs\":{\"steps\":\"your plan here\"}}\n"
-        "Do NOT use task, goal, plan, or subtasks as the key.\n"
-    )
     
     rescue_prompt += (
         "Use this exact format:\n"

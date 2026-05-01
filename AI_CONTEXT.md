@@ -4,7 +4,7 @@
 
 ## 📌 Project Overview
 
-**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It acts as an "Executor" — reads tasks from `todo.txt`, plans, searches the web, browses pages, runs terminal commands, executes Python scripts, and self-repairs errors. It supports dual-model architecture (Mimo + Gemini rescue), **proactive skill discovery with auto-routing**, lazy-loaded engineering skills, Telegram bot remote control, and Antigravity ecosystem integration.
+**Agent V7.2** is a fully autonomous, loop-driven execution agent built in Python. It acts as an "Executor" — reads tasks from `todo.txt`, plans, searches the web, browses pages, runs terminal commands, executes Python scripts, and self-repairs errors. It supports dual-model architecture (Mimo + Gemini rescue), **proactive skill discovery with auto-routing**, lazy-loaded engineering skills with **Lean Injection (Skill Budget)**, Telegram bot remote control, and Antigravity ecosystem integration (including `marimo` reactive notebooks).
 
 ---
 
@@ -37,12 +37,15 @@
 
 ## 🧠 Core Architecture & Workflows
 
-### 1. Dual-Model Architecture (`core/llm.py`)
+### 1. Dual-Model Architecture & Fallbacks (`core/llm.py`)
 - **Primary Executor (Mimo)**: Uses `mimo-v2.5-pro` via OpenAI SDK. Outputs strict JSON blocks with `action` + `kwargs`. Supports `reasoning_effort: high`.
-- **Rescue Supervisor (Gemini)**: Uses `gemini-3-flash-preview`. Activated when the primary model gets stuck (repeated actions, parse failures, errors). Truncates history and asks Gemini for a recovery action.
+- **Rescue Supervisor (Gemini)**: Uses `gemini-3-flash-preview`. Activated when the primary model gets stuck.
+- **Local Repair Pre-check**: For trivial format errors (e.g. missing `steps` in `plan`), the agent self-repairs locally, saving Gemini API calls.
+- **429 Rate Limit Fallback**: If Gemini's quota is exhausted, the agent automatically falls back to a local robust plan rather than crashing.
+- **Rescue Cooldown**: 3-step cooldown prevents API spam loops.
 
 ### 2. State & Persistence (`core/agent.py`)
-- `AgentState` dataclass tracks: `repeat_count`, `parse_fail_count`, `error_count`, `search_count`, `hard_reset_count`.
+- `AgentState` dataclass tracks: `repeat_count`, `parse_fail_count`, `error_count`, `search_count`, `hard_reset_count`, and `loaded_skills` (for skill budgeting).
 - Saved to `workspace/state.json`. If crashed and restarted by `start_agent.bat`, the agent resumes with counters intact.
 
 ### 3. History Management (`trim_history`)
@@ -98,8 +101,10 @@ The System Prompt instructs the agent to follow a mandatory workflow:
 - `_preload_skills(skills, msgs)`: Loads selected skills into System Prompt before loop starts
 - Notifies agent which skills are pre-loaded to avoid redundant discovery
 
-### 7. Skill Injection
-When `get_skill` or `load_preset` succeeds (whether called manually by agent or auto-loaded by router), the skill content is injected directly into the System Prompt (`msgs[0]`) to prevent it from being discarded during history trimming.
+### 7. Skill Injection & Budgeting
+When `get_skill` or `load_preset` succeeds, the skill is processed via **Lean Injection** (`_summarize_skill`). Instead of injecting large files verbatim, it intelligently extracts headings and key bullet points, truncating at `SKILL_SUMMARY_MAX_CHARS` (default 600).
+- **Skill Budget**: The agent tracks active skills (`self.state.loaded_skills`) and blocks loading if it exceeds `MAX_SKILLS_LOADED` (default 4) to prevent context window explosion.
+- The summarized content is appended directly into the System Prompt (`msgs[0]`).
 
 ### 8. Telegram Bot (`telegram_bot.py`)
 - Remote task submission via Telegram messages.
@@ -124,11 +129,13 @@ All config is loaded from environment variables (`.env` file) with sensible defa
 | `MIMO_MODEL` | `mimo-v2.5-pro` | Primary model name |
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | Rescue model name |
 | `MIMO_BASE_URL` | OpenAI default | Custom endpoint URL |
-| `MAX_STEPS` | `50` | Max execution steps per task |
+| `MAX_STEPS` | `40` | Max execution steps per task |
 | `MAX_HISTORY` | `20` | Max messages kept in context |
 | `MAX_CONTEXT_CHARS` | `60000` | Character budget for context window |
+| `MAX_SKILLS_LOADED` | `6` | Limit for concurrent skills in context |
+| `SKILL_SUMMARY_MAX_CHARS`| `600` | Truncation limit for skill injection |
 | `POLL_INTERVAL` | `2` | Seconds between todo.txt polls |
-| `ALLOWED_BINARIES` | `python,python3,ls,cat,echo` | Whitelist for `run_cmd` |
+| `ALLOWED_BINARIES` | `python,python3,pip,pip3,ls,cat,echo,git` | Whitelist for `run_cmd` |
 | `ALLOWED_DOMAINS` | `*` | Network guard for `run_python_script` |
 | `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
 | `TELEGRAM_ALLOWED_USER_ID` | — | Authorized Telegram user ID |

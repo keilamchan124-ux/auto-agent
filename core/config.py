@@ -24,13 +24,13 @@ class Config:
     SKILLS_DIR = Path(__file__).resolve().parent.parent / ".agents" / "skills"
 
     # ===== AGENT 控制 =====
-    MAX_STEPS = int(os.getenv("MAX_STEPS", 25))
+    MAX_STEPS = int(os.getenv("MAX_STEPS", 40))   # 從 25 增加到 40
     MAX_HISTORY = int(os.getenv("MAX_HISTORY", 20))
     MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", 60000))  # 提升 Context 上限以容納多個 Skill
     POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 2))
 
     # ===== 技能限制 (SKILL BUDGET) =====
-    MAX_SKILLS_LOADED = int(os.getenv("MAX_SKILLS_LOADED", 4))
+    MAX_SKILLS_LOADED = int(os.getenv("MAX_SKILLS_LOADED", 6))
     SKILL_SUMMARY_MAX_CHARS = int(os.getenv("SKILL_SUMMARY_MAX_CHARS", 600))
 
     # ===== 常用技能組合 (SKILL PRESETS) =====
@@ -147,15 +147,15 @@ class Config:
         
         "=== MANDATORY WORKFLOW ===\n"
         "1. THINK: Analyze task domain.\n"
-        "2. DISCOVER & LOAD: Check auto-loaded skills. Call `list_skills` or `get_skill` (up to 4 max) if needed.\n"
+        "2. DISCOVER & LOAD: Check auto-loaded skills. Call `list_skills` or `get_skill` (up to 6 max) if needed.\n"
         "3. PLAN: Use `plan` tool to outline steps.\n"
         "4. EXECUTE & FINISH: Act, then `mark_done`.\n\n"
         
         "=== AVAILABLE ACTIONS ===\n"
         "| Action | Usage |\n"
         "|---|---|\n"
-        "| list_skills, get_skill, load_preset | Discover/load domain skills (frontend/backend/debug/research/new_project) |\n"
-        "| plan | Outline execution steps |\n"
+        "| list_skills, get_skill, load_preset | Discover/load domain skills |\n"
+        "| plan | Outline execution steps (MUST use 'steps' parameter) |\n"
         "| web_search, browse_page | Find/read information |\n"
         "| download_file, run_cmd | Shell execution (guarded) & IO |\n"
         "| write_file, read_file | Local file management |\n"
@@ -165,6 +165,26 @@ class Config:
         "=== RULES ===\n"
         "1. NEVER repeat the same action >2 times.\n"
         "2. If a skill is already AUTO-LOADED, do not load it again.\n"
+        "3. After any error or rescue, you MUST summarize what mistake you made.\n\n"
+        
+        "=== CRITICAL: TOOL PARAMETER EXAMPLES (MUST FOLLOW) ===\n"
+        "You MUST use the EXACT parameter names:\n\n"
+        
+        "【plan 工具 - 正確範例】\n"
+        "✅ 正確：{\"action\":\"plan\",\"kwargs\":{\"steps\":\"1. First step\\n2. Second step\"}}\n"
+        "❌ 錯誤：使用 task、goal、tasks、input 作為 key\n\n"
+        
+        "【get_skill 工具 - 正確範例】\n"
+        "✅ 正確：{\"action\":\"get_skill\",\"kwargs\":{\"skill_name\":\"frontend-ui-engineering\"}}\n"
+        "❌ 錯誤：使用 name 作為 key\n\n"
+        
+        "【其他工具正確參數】\n"
+        "- web_search → {\"q\": \"search term\"}\n"
+        "- browse_page → {\"url\": \"https://...\"}\n"
+        "- write_file → {\"path\": \"file.py\", \"content\": \"...\"}\n"
+        "- run_cmd → {\"cmd\": \"ls -la\"}   (注意是 cmd，不是 command)\n\n"
+        
+        "如果工具回傳錯誤包含 'missing ... argument'，請立即使用正確參數名稱重試。\n"
     )
 
     SYSTEM_PROMPT = _BASE_PROMPT
