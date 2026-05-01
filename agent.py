@@ -78,7 +78,7 @@ Task executed successfully.
     # ---------- Context / History ----------
     def smart_summarize_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if len(msgs) <= 6:
-            return self.smart_summarize_history(msgs)
+            return msgs
 
         recent = msgs[-4:]
         old_history = msgs[2:-4]
@@ -286,7 +286,7 @@ Task executed successfully.
             {"role": "user", "content": task}
         ]
 
-        max_steps = getattr(Config, "MAX_STEPS", 20)
+        max_steps = getattr(Config, "MAX_STEPS", 40)
 
         for step in range(1, max_steps + 1):
             logger.info("🧠 Step %s/%s", step, max_steps)

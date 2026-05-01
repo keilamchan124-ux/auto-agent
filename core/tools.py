@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -21,9 +22,7 @@ logger = logging.getLogger("Tools")
 
 
 def format_result(ok: bool, message: str, data: Dict[str, Any] = None, error_type: str = None) -> str:
-    """
-    統一結構化回傳，保持 JSON string。
-    """
+    """Unified structured JSON-string response."""
     res: Dict[str, Any] = {
         "ok": bool(ok),
         "message": str(message),
@@ -40,9 +39,7 @@ def _workspace_root() -> Path:
 
 
 def safe_path(p: str) -> Path:
-    """
-    限制所有檔案操作只可喺 workspace 入面。
-    """
+    """Restrict all file operations to workspace."""
     root = _workspace_root()
     full = (root / p).resolve()
 
@@ -62,10 +59,40 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
-def browse_page(url: str) -> str:
-    """
-    讀取網頁內容並轉為乾淨的 Markdown，支援 HTML, PDF 等。
-    """
+def _extract_key_lines(text: str, max_lines: int = 12) -> list[str]:
+    lines = text.splitlines()
+    key = []
+    markers = ("#", "##", "###", "def ", "class ", "function", "return", "error", "warning")
+    for ln in lines:
+        s = ln.strip()
+        if s and any(m in s.lower() for m in markers):
+            key.append(s)
+        if len(key) >= max_lines:
+            break
+    return key
+
+
+def _smart_file_summary(text: str, head: int = 60, tail: int = 20) -> dict:
+    lines = text.splitlines()
+    total = len(lines)
+    head_block = lines[:head]
+    tail_block = lines[-tail:] if total > head else []
+    funcs = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("def ") or s.startswith("class "):
+            funcs.append(s[:120])
+        if len(funcs) >= 20:
+            break
+    return {
+        "summary": "\n".join(head_block + (["..."] if tail_block else []) + tail_block),
+        "total_lines": total,
+        "important_symbols": funcs,
+    }
+
+
+def browse_page(url: str, full_output: bool = False) -> str:
+    """Fetch a page and convert it to clean Markdown (HTML/PDF/etc)."""
     try:
         url = str(url).strip()
         headers = {
@@ -96,42 +123,45 @@ def browse_page(url: str) -> str:
             except Exception:
                 pass
 
-        return format_result(True, f"Successfully fetched {url}", data={"url": url, "content": _truncate(content, 30000)})
+        if full_output:
+            return format_result(True, f"Successfully fetched {url}", data={"url": url, "content": _truncate(content, 30000), "mode": "full"})
+
+        lead = _truncate(content, 3000)
+        key = _extract_key_lines(content, max_lines=12)
+        compact = lead + ("\n\n[Key excerpts]\n- " + "\n- ".join(key) if key else "")
+        return format_result(True, f"Successfully fetched {url}", data={"url": url, "content": compact, "mode": "smart_summary"})
     except Exception as e:
         return format_result(False, f"Failed to fetch {url}: {e}", error_type="network_error")
 
 
 @functools.lru_cache(maxsize=16)
-def web_search(q: str) -> str:
-    """
-    網頁搜尋：回傳少量、結構化摘要，避免 context 爆大。
-    """
+def web_search(q: str, full_output: bool = False) -> str:
+    """Web search with compact structured output to reduce context size."""
     try:
         q = str(q).strip()
         if not q:
             return format_result(False, "Empty query.", error_type="search_error")
 
         with DDGS() as d:
-            results = list(d.text(q, max_results=3))
+            results = list(d.text(q, max_results=10))
 
         data = []
-        for r in results:
+        selected = results if full_output else results[:5]
+        for r in selected:
             data.append({
                 "title": _truncate(str(r.get("title", "")), 160),
-                "body": _truncate(str(r.get("body", "")), 260),
+                "body": _truncate(str(r.get("body", "")), 160),
                 "href": _truncate(str(r.get("href", "")), 300),
             })
 
         message = "Search completed." if data else "No result found."
-        return format_result(True, message, data=data)
+        return format_result(True, message, data={"results": data, "count": len(data), "mode": "full" if full_output else "lean_top5"})
     except Exception as e:
         return format_result(False, str(e), error_type="search_error")
 
 
 def download_file(url: str, path: str) -> str:
-    """
-    下載檔案，阻止 HTML 頁面被當成檔案寫入。
-    """
+    """Download a file and block accidental HTML-page downloads."""
     try:
         p = safe_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -158,9 +188,7 @@ def download_file(url: str, path: str) -> str:
 
 
 def run_cmd(cmd: str) -> str:
-    """
-    只允許白名單 binary。
-    """
+    """Execute shell command with binary allowlist."""
     try:
         cmd = str(cmd).strip()
         if not cmd:
@@ -202,7 +230,7 @@ def write_file(path: str, content: str) -> str:
         return format_result(False, str(e), error_type="io_error")
 
 
-def read_file(path: str) -> str:
+def read_file(path: str, full_output: bool = False) -> str:
     try:
         p = safe_path(path)
         if not p.exists():
@@ -211,20 +239,30 @@ def read_file(path: str) -> str:
             return format_result(False, "Path is not a file.", error_type="io_error")
 
         text = p.read_text(encoding="utf-8", errors="replace")
-        return format_result(True, _truncate(text, 5000))
+        if full_output:
+            return format_result(True, "Read file success.", data={"content": _truncate(text, 30000), "mode": "full"})
+        summary = _smart_file_summary(text, head=80, tail=20)
+        return format_result(
+            True,
+            "Read file success.",
+            data={
+                "content": summary["summary"],
+                "total_lines": summary["total_lines"],
+                "important_symbols": summary["important_symbols"],
+                "mode": "lean_regions",
+            },
+        )
     except Exception as e:
         return format_result(False, str(e), error_type="io_error")
 
 
-def run_python_script(code: str) -> str:
-    """
-    執行一段 Python 程式碼，賦予 Agent 原生 Python 能力 (Antigravity!)
-    """
+def run_python_script(code: str, full_output: bool = False) -> str:
+    """Run Python code with optional network guard."""
     try:
         if not code:
             return format_result(False, "Empty code.", error_type="execution_error")
 
-        # 若 ALLOWED_DOMAINS 不是 '*' (不限制)，則在腳本頂部注入網路攔截器
+        # If ALLOWED_DOMAINS is restricted, inject a network guard.
         if Config.ALLOWED_DOMAINS and "*" not in Config.ALLOWED_DOMAINS:
             guard_code = """
 import socket
@@ -239,13 +277,13 @@ def _safe_connect(self, address):
     return _orig_connect(self, address)
 socket.socket.connect = _safe_connect
 """
-            # 將安全守衛放在 Agent 寫出的程式碼最上方
+            # Place guard code at the top of generated script.
             code = guard_code.strip() + "\n\n" + code
 
         script_path = safe_path(".temp_agent_script.py")
         script_path.write_text(code, encoding="utf-8")
 
-        # 自動判斷要用 python 還是 python3
+        # Prefer python3 when allowed, otherwise fallback to python.
         cmd_exe = "python3" if "python3" in Config.ALLOWED_BINARIES else "python"
         
         r = subprocess.run(
@@ -256,16 +294,17 @@ socket.socket.connect = _safe_connect
             timeout=60
         )
 
-        out = (r.stdout + "\n" + r.stderr).strip()
-        return format_result(True, _truncate(out or "Success (No output)", 2000))
+        out = (r.stdout + "\n" + r.stderr).strip() or "Success (No output)"
+        if full_output:
+            return format_result(True, _truncate(out, 12000), data={"mode": "full"})
+        top20 = "\n".join(out.splitlines()[:20])
+        return format_result(True, _truncate(top20, 4000), data={"mode": "lean_top20_lines"})
     except Exception as e:
         return format_result(False, str(e), error_type="execution_error")
 
 
 def load_preset(preset_name: str) -> str:
-    """
-    一鍵載入多個預設 Skill組合。
-    """
+    """Load multiple skills from a preset."""
     try:
         preset_name = str(preset_name).strip()
         presets = getattr(Config, "SKILL_PRESETS", {})
@@ -321,9 +360,7 @@ def get_skill(skill_name: str) -> str:
 
 
 def git_commit(message: str) -> str:
-    """
-    執行 git add . 及 git commit -m <message>。
-    """
+    """Run git add + git commit."""
     try:
         message = str(message).strip()
         if not message:
@@ -350,14 +387,161 @@ def git_commit(message: str) -> str:
         return format_result(False, str(e), error_type="git_error")
 
 
+def github_clone(repo_url: str, target_dir: str = "") -> str:
+    try:
+        repo_url = str(repo_url).strip()
+        if not repo_url:
+            return format_result(False, "repo_url is required.", error_type="github_error")
+        if not repo_url.startswith("https://github.com/"):
+            return format_result(False, "Only https://github.com/... is supported.", error_type="github_error")
+
+        repo_name = repo_url.rstrip("/").split("/")[-1]
+        repo_name = repo_name[:-4] if repo_name.endswith(".git") else repo_name
+        dest_rel = target_dir.strip() if str(target_dir).strip() else repo_name
+        dest = safe_path(dest_rel)
+
+        if dest.exists():
+            return format_result(False, f"Target already exists: {dest_rel}", error_type="io_error")
+
+        r = subprocess.run(["git", "clone", repo_url, str(dest)], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            return format_result(False, f"git clone failed: {r.stderr.strip()}", error_type="git_error")
+        return format_result(True, f"Cloned {repo_url} -> {dest_rel}")
+    except Exception as e:
+        return format_result(False, str(e), error_type="github_error")
+
+
+def github_read_file(
+    repo_dir: str,
+    file_path: str,
+    max_chars: int = 4000,
+    lean_mode: bool = True,
+    full_output: bool = False,
+    start_line: int = 1,
+    end_line: int = 0,
+) -> str:
+    try:
+        repo_dir = str(repo_dir).strip()
+        file_path = str(file_path).strip()
+        if not repo_dir or not file_path:
+            return format_result(False, "repo_dir and file_path are required.", error_type="io_error")
+
+        repo_root = safe_path(repo_dir)
+        target = (repo_root / file_path).resolve()
+        if repo_root != target and repo_root not in target.parents:
+            return format_result(False, "Security Violation", error_type="security_error")
+        if not target.exists() or not target.is_file():
+            return format_result(False, "File not found.", error_type="io_error")
+
+        max_chars = max(500, min(int(max_chars), 12000))
+        text = target.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+
+        # staged retrieval: only return a line range when requested
+        if end_line and end_line >= start_line >= 1:
+            selected = lines[start_line - 1:end_line]
+            payload = "\n".join(selected)
+            if lean_mode:
+                payload = _truncate(payload, max_chars)
+            return format_result(
+                True,
+                "Read file success.",
+                data={
+                    "content": payload,
+                    "range": {"start_line": start_line, "end_line": end_line},
+                    "total_lines": len(lines),
+                },
+            )
+
+        if full_output:
+            return format_result(True, "Read file success.", data={"content": text, "total_lines": len(lines), "mode": "full"})
+
+        # lean mode default: return head+tail+symbols
+        if lean_mode:
+            summary = _smart_file_summary(text, head=60, tail=20)
+            payload = _truncate(summary["summary"], max_chars)
+            return format_result(
+                True,
+                "Read file success.",
+                data={
+                    "content": payload,
+                    "total_lines": summary["total_lines"],
+                    "important_symbols": summary["important_symbols"],
+                    "mode": "lean_regions",
+                },
+            )
+
+        return format_result(True, "Read file success.", data={"content": _truncate(text, max_chars), "total_lines": len(lines), "mode": "plain_truncate"})
+    except Exception as e:
+        return format_result(False, str(e), error_type="io_error")
+
+
+def github_commit_push(repo_dir: str, message: str, branch: str = "", lean_mode: bool = True) -> str:
+    try:
+        repo_root = safe_path(repo_dir)
+        message = str(message).strip()
+        if not message:
+            return format_result(False, "Commit message is required.", error_type="git_error")
+
+        cmds = [["git", "add", "."]]
+        if branch.strip():
+            cmds.append(["git", "checkout", "-B", branch.strip()])
+        cmds.append(["git", "commit", "-m", message])
+        cmds.append(["git", "push", "-u", "origin", branch.strip() or "HEAD"])
+
+        outputs = []
+        for cmd in cmds:
+            r = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, timeout=60)
+            out = (r.stdout + "\n" + r.stderr).strip()
+            if r.returncode != 0 and not ("nothing to commit" in out.lower() and cmd[:2] == ["git", "commit"]):
+                return format_result(False, f"{' '.join(cmd)} failed: {out}", error_type="git_error")
+            if lean_mode:
+                outputs.append({"cmd": " ".join(cmd), "status": "ok"})
+            else:
+                outputs.append(f"$ {' '.join(cmd)}\n{_truncate(out or 'ok', 500)}")
+
+        if lean_mode:
+            return format_result(True, "Commit and push completed.", data={"steps": outputs})
+        return format_result(True, "Commit and push completed.", data={"log": "\n\n".join(outputs)})
+    except Exception as e:
+        return format_result(False, str(e), error_type="git_error")
+
+
+def github_create_pr(repo: str, title: str, body: str = "", base: str = "main", head: str = "") -> str:
+    try:
+        token = os.getenv("GITHUB_TOKEN", "").strip()
+        if not token:
+            return format_result(False, "GITHUB_TOKEN is required.", error_type="github_error")
+        repo = str(repo).strip()
+        title = str(title).strip()
+        base = str(base).strip() or "main"
+        head = str(head).strip()
+        if not repo or not title or not head:
+            return format_result(False, "repo/title/head are required.", error_type="github_error")
+        if not re.match(r"^[^/]+/[^/]+$", repo):
+            return format_result(False, "repo must be in owner/name format.", error_type="github_error")
+
+        url = f"https://api.github.com/repos/{repo}/pulls"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        payload = {"title": title, "body": str(body), "base": base, "head": head}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        if resp.status_code >= 300:
+            return format_result(False, f"GitHub API error {resp.status_code}: {resp.text[:300]}", error_type="github_error")
+        data = resp.json()
+        return format_result(True, "PR created successfully.", data={"url": data.get("html_url", ""), "number": data.get("number")})
+    except Exception as e:
+        return format_result(False, str(e), error_type="github_error")
+
+
 def plan(steps: str | list | dict = None, **kwargs) -> str:
-    """
-    允許 Agent 輸出計畫，並將計畫記錄下來。
-    接受多種格式的規劃輸入，自動正規化成字串。
-    """
+    """Record planning text. Accepts multiple input shapes and normalizes to string."""
     try:
         if isinstance(steps, (list, dict)):
-            # 自動轉成易讀文字
+            # Normalize list/dict to readable text.
             if isinstance(steps, list):
                 content = "\n".join([str(s) for s in steps])
             else:
@@ -365,7 +549,7 @@ def plan(steps: str | list | dict = None, **kwargs) -> str:
         elif isinstance(steps, str):
             content = steps
         else:
-            # 嘗試從 kwargs 組合
+            # Fallback extraction from common alias keys.
             content = str(kwargs.get("task") or kwargs.get("plan") or kwargs.get("goal") or "No plan content")
         
         return format_result(True, f"Plan recorded:\n{_truncate(content, 2000)}")
@@ -374,10 +558,7 @@ def plan(steps: str | list | dict = None, **kwargs) -> str:
 
 
 def list_skills(query: str = "") -> str:
-    """
-    列出所有可用技能，支援關鍵字過濾。
-    讓 Agent 可以主動「探索」有哪些技能可用，再決定載入哪些。
-    """
+    """List available skills with optional keyword filtering."""
     try:
         skills_dir = Config.SKILLS_DIR
         if not skills_dir.exists():
@@ -394,16 +575,16 @@ def list_skills(query: str = "") -> str:
             skill_name = skill_dir.name
             skill_file = skill_dir / "SKILL.md"
 
-            # 從 SKILL_TAGS 取得描述和關鍵字
+            # Read metadata from SKILL_TAGS.
             tag_info = skill_tags.get(skill_name, {})
             description = tag_info.get("description", "")
             keywords = tag_info.get("keywords", [])
 
-            # 如果 SKILL_TAGS 沒有描述，嘗試從 SKILL.md 讀前 200 字
+            # Fallback: infer short description from SKILL.md.
             if not description and skill_file.exists():
                 try:
                     raw = skill_file.read_text(encoding="utf-8", errors="replace")[:300]
-                    # 取第一段非空行作為描述
+                    # Use the first non-empty line as description.
                     for line in raw.split("\n"):
                         line = line.strip().strip("#").strip("-").strip()
                         if line and len(line) > 10:
@@ -412,7 +593,7 @@ def list_skills(query: str = "") -> str:
                 except Exception:
                     description = "(no description)"
 
-            # 如果有 query，做簡單的關鍵字過濾
+            # Optional query filter.
             if query_lower:
                 name_match = query_lower in skill_name.lower()
                 desc_match = query_lower in description.lower()
@@ -423,7 +604,7 @@ def list_skills(query: str = "") -> str:
             skills.append({
                 "name": skill_name,
                 "description": description,
-                "keywords": keywords[:5],  # 只返回前 5 個關鍵字以節省 context
+                "keywords": keywords[:5],  # Return only first 5 keywords to save context.
                 "has_skill_file": skill_file.exists(),
             })
 
@@ -451,16 +632,20 @@ TOOLS_REGISTRY = {
     "list_skills": list_skills,
     "plan": plan,
     "git_commit": git_commit,
+    "github_clone": github_clone,
+    "github_read_file": github_read_file,
+    "github_commit_push": github_commit_push,
+    "github_create_pr": github_create_pr,
     "browse_page": browse_page,
 }
 
 
 def execute_tool(action: str, kwargs: dict) -> str:
     """
-    Schema 硬約束：
-    - 忽略多餘參數
-    - 支援少量 alias
-    - 永遠回傳 JSON string
+    Strict schema behavior:
+    - ignore unknown params
+    - support a small alias set
+    - always return JSON string
     """
     if action not in TOOLS_REGISTRY:
         return format_result(False, f"Tool {action} not found.", error_type="tool_not_found")

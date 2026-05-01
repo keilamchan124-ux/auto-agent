@@ -15,7 +15,7 @@ class Config:
     MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
-    # ✅ 新增：Base URL（有 fallback）
+    # Base URL (with fallback)
     MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "").strip() or None
 
     # ===== WORKSPACE =====
@@ -23,17 +23,17 @@ class Config:
     TODO_FILE = Path(os.getenv("TODO_FILE", "todo.txt"))
     SKILLS_DIR = Path(__file__).resolve().parent.parent / ".agents" / "skills"
 
-    # ===== AGENT 控制 =====
-    MAX_STEPS = int(os.getenv("MAX_STEPS", 40))   # 從 25 增加到 40
+    # ===== AGENT CONTROL =====
+    MAX_STEPS = int(os.getenv("MAX_STEPS", 40))   # increased from 25 to 40
     MAX_HISTORY = int(os.getenv("MAX_HISTORY", 20))
-    MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", 60000))  # 提升 Context 上限以容納多個 Skill
+    MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", 60000))  # higher context budget for multiple skills
     POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 2))
 
-    # ===== 技能限制 (SKILL BUDGET) =====
+    # ===== SKILL LIMITS (SKILL BUDGET) =====
     MAX_SKILLS_LOADED = int(os.getenv("MAX_SKILLS_LOADED", 6))
     SKILL_SUMMARY_MAX_CHARS = int(os.getenv("SKILL_SUMMARY_MAX_CHARS", 600))
 
-    # ===== 常用技能組合 (SKILL PRESETS) =====
+    # ===== COMMON SKILL PRESETS =====
     SKILL_PRESETS = {
         "frontend": ["frontend-ui-engineering", "browser-testing-with-devtools", "api-and-interface-design"],
         "backend": ["api-and-interface-design", "security-and-hardening", "test-driven-development"],
@@ -42,7 +42,7 @@ class Config:
         "new_project": ["spec-driven-development", "planning-and-task-breakdown", "git-workflow-and-versioning"]
     }
 
-    # ===== 技能標籤（用於自動路由） =====
+    # ===== SKILL TAGS (for auto-routing) =====
     SKILL_TAGS = {
         "frontend-ui-engineering": {
             "keywords": ["frontend", "ui", "react", "html", "css", "vue", "svelte", "component", "layout", "responsive", "design", "tailwind", "animation", "interface", "webpage", "website"],
@@ -92,6 +92,10 @@ class Config:
             "keywords": ["git", "commit", "branch", "merge", "conflict", "version", "release", "tag", "pr", "pull request"],
             "description": "Structure git workflow and versioning practices"
         },
+        "github-integration-lite": {
+            "keywords": ["github", "clone", "pull request", "pr", "commit", "push", "repository"],
+            "description": "Lightweight GitHub skill with clone/read/commit-push/create-pr tools"
+        },
         "performance-optimization": {
             "keywords": ["performance", "optimize", "speed", "latency", "cache", "memory", "profile", "bottleneck", "web vitals", "load time", "slow"],
             "description": "Optimize application performance"
@@ -130,7 +134,7 @@ class Config:
         },
     }
 
-    # ===== 安全 =====
+    # ===== SECURITY =====
     ALLOWED_BINARIES = set(
         os.getenv("ALLOWED_BINARIES", "python,python3,pip,pip3,ls,cat,echo,git").split(",")
     )
@@ -170,21 +174,21 @@ class Config:
         "=== CRITICAL: TOOL PARAMETER EXAMPLES (MUST FOLLOW) ===\n"
         "You MUST use the EXACT parameter names:\n\n"
         
-        "【plan 工具 - 正確範例】\n"
-        "✅ 正確：{\"action\":\"plan\",\"kwargs\":{\"steps\":\"1. First step\\n2. Second step\"}}\n"
-        "❌ 錯誤：使用 task、goal、tasks、input 作為 key\n\n"
+        "[plan tool - correct example]\n"
+        "✅ Correct: {\"action\":\"plan\",\"kwargs\":{\"steps\":\"1. First step\\n2. Second step\"}}\n"
+        "❌ Wrong: do not use task, goal, tasks, or input as key\n\n"
         
-        "【get_skill 工具 - 正確範例】\n"
-        "✅ 正確：{\"action\":\"get_skill\",\"kwargs\":{\"skill_name\":\"frontend-ui-engineering\"}}\n"
-        "❌ 錯誤：使用 name 作為 key\n\n"
+        "[get_skill tool - correct example]\n"
+        "✅ Correct: {\"action\":\"get_skill\",\"kwargs\":{\"skill_name\":\"frontend-ui-engineering\"}}\n"
+        "❌ Wrong: do not use name as key\n\n"
         
-        "【其他工具正確參數】\n"
+        "[other tool parameter examples]\n"
         "- web_search → {\"q\": \"search term\"}\n"
         "- browse_page → {\"url\": \"https://...\"}\n"
         "- write_file → {\"path\": \"file.py\", \"content\": \"...\"}\n"
-        "- run_cmd → {\"cmd\": \"ls -la\"}   (注意是 cmd，不是 command)\n\n"
+        "- run_cmd → {\"cmd\": \"ls -la\"}   (use cmd, not command)\n\n"
         
-        "如果工具回傳錯誤包含 'missing ... argument'，請立即使用正確參數名稱重試。\n"
+        "If tool errors include 'missing ... argument', retry immediately with exact parameter names.\n"
     )
 
     SYSTEM_PROMPT = _BASE_PROMPT
@@ -197,11 +201,11 @@ class Config:
         )
 
 
-# ===== 初始化 =====
+# ===== INIT =====
 Config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ===== 啟動檢查（關鍵）=====
+# ===== STARTUP CHECK =====
 def validate():
     if not Config.MIMO_API_KEY:
         print("⚠️ WARNING: MIMO_API_KEY is empty")
@@ -209,7 +213,7 @@ def validate():
     if not Config.GEMINI_API_KEY:
         print("⚠️ WARNING: GEMINI_API_KEY is empty")
 
-    # ✅ 呢行好重要：避免你再 debug 半日
+    # Important: avoid debugging failures caused by unset base URL.
     if Config.MIMO_BASE_URL is None:
         print("ℹ️ INFO: MIMO_BASE_URL not set, using OpenAI default endpoint")
 
