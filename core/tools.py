@@ -247,6 +247,18 @@ def get_skill(skill_name: str) -> str:
         return format_result(False, f"Failed to load skill: {e}", error_type="runtime_error")
 
 
+def plan(steps: str) -> str:
+    """
+    允許 Agent 輸出計畫，並將計畫記錄下來。
+    """
+    try:
+        if not steps:
+            return format_result(False, "Plan steps are empty.", error_type="execution_error")
+        return format_result(True, f"Plan recorded:\n{_truncate(str(steps), 2000)}")
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
@@ -255,6 +267,7 @@ TOOLS_REGISTRY = {
     "read_file": read_file,
     "run_python_script": run_python_script,
     "get_skill": get_skill,
+    "plan": plan,
 }
 
 

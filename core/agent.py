@@ -74,7 +74,7 @@ Task executed successfully.
     # ---------- Context / History ----------
     def smart_summarize_history(self, msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if len(msgs) <= 6:
-            return self.smart_summarize_history(msgs)
+            return self.trim_history(msgs)
 
         recent = msgs[-4:]
         old_history = msgs[2:-4]
@@ -167,23 +167,6 @@ Task executed successfully.
                 pass
 
         return None
-
-        # 1) strict fenced block
-        match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
-        if not match:
-            # 2) fallback: first object-like block
-            match = re.search(r"(\{.*\})", text, re.DOTALL)
-
-        if not match:
-            return None
-
-        try:
-            obj = json.loads(match.group(1).strip())
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            return None
-
         return None
 
     # ---------- Context append ----------
