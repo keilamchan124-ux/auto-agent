@@ -12,6 +12,12 @@ logger = logging.getLogger("LLM")
 
 GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
+NIM_GATEWAY_CLIENT = OpenAI(
+    api_key=Config.NIM_GATEWAY_API_KEY,
+    base_url=Config.NIM_GATEWAY_BASE_URL,
+    timeout=120,
+) if Config.NIM_GATEWAY_API_KEY and Config.NIM_GATEWAY_BASE_URL else None
+
 MIMO_CLIENT = OpenAI(
     api_key=Config.MIMO_API_KEY,
     base_url=Config.MIMO_BASE_URL,
@@ -51,15 +57,12 @@ def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: int = 2) -> str:
-    """
-    Gemini acts as a rescue supervisor.
-    Output must be a single fenced JSON block.
-    """
+    """Rescue supervisor with fallback order: GLM-4.7 > Gemini 3.1 flash lite > Gemma 4."""
     rescue_prompt = "You are a rescue controller for an execution agent.\n"
 
     if stuck_reason:
         rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
-        
+
         if "FORMAT" in stuck_reason or "JSON" in stuck_reason:
             rescue_prompt += (
                 "\nCRITICAL INSTRUCTION: You MUST return exactly one fenced JSON block containing `action` and `kwargs`.\n"
@@ -78,7 +81,7 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
                 "\nCRITICAL INSTRUCTION: Analyze the runtime or execution error.\n"
                 "Choose a different strategy, try installing missing dependencies, or write a different command.\n"
             )
-    
+
     rescue_prompt += (
         "\nReturn ONLY one fenced JSON block.\n"
         "No explanation. No markdown outside the JSON block. No thoughts.\n"
@@ -94,22 +97,57 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
     contents = []
     for m in _clean_history(history):
         role = "user" if m["role"] in ("user", "system") else "model"
-        contents.append({
-            "role": role,
-            "parts": [{"text": m["content"]}]
-        })
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
 
-    contents.append({
-        "role": "user",
-        "parts": [{"text": rescue_prompt}]
-    })
+    contents.append({"role": "user", "parts": [{"text": rescue_prompt}]})
 
-    # Route rescue through configured backend.
-    rescue_backend = getattr(Config, "RESCUE_BACKEND", "mimo")
-    if rescue_backend == "mimo":
-        return _call_mimo_rescue(contents, retries=retries)
-    return _call_gemini_rescue(contents, retries=retries)
+    # Priority chain: GLM-4.7 (NIM gateway) > Gemini > Gemma 4 (MIMO/OpenAI-compatible)
+    nim_err = None
+    try:
+        return _call_nim_rescue(contents, retries=retries)
+    except Exception as e:
+        nim_err = e
+        logger.warning("GLM rescue unavailable, fallback to Gemini: %s", e)
 
+    try:
+        return _call_gemini_rescue(contents, retries=retries)
+    except Exception as e:
+        logger.warning("Gemini rescue unavailable, fallback to Gemma 4: %s", e)
+        if nim_err:
+            logger.debug("Earlier GLM/NIM error: %s", nim_err)
+
+    return _call_mimo_rescue(contents, retries=retries)
+
+
+def _call_nim_rescue(contents: list, retries: int = 2) -> str:
+    if NIM_GATEWAY_CLIENT is None:
+        raise RuntimeError("NIM gateway is not configured. Set NIM_GATEWAY_API_KEY and NIM_GATEWAY_BASE_URL.")
+
+    rescue_messages = []
+    for c in contents:
+        role = "assistant" if c.get("role") == "model" else "user"
+        text = ""
+        parts = c.get("parts") or []
+        if parts and isinstance(parts[0], dict):
+            text = _normalize_text(parts[0].get("text", ""))
+        rescue_messages.append({"role": role, "content": text})
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            res = NIM_GATEWAY_CLIENT.chat.completions.create(
+                model=getattr(Config, "NIM_RESCUE_MODEL", "glm-4.7"),
+                messages=rescue_messages,
+                temperature=0.0,
+            )
+            return (res.choices[0].message.content or "").strip()
+        except Exception as e:
+            last_err = e
+            logger.warning("GLM rescue failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
+            if attempt < retries:
+                _sleep_backoff(attempt)
+
+    raise RuntimeError(f"GLM rescue failed: {last_err}")
 
 def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     if GEMINI_CLIENT is None:
