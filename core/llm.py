@@ -13,6 +13,12 @@ logger = logging.getLogger("LLM")
 
 GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
+NIM_GATEWAY_CLIENT = OpenAI(
+    api_key=Config.NIM_GATEWAY_API_KEY,
+    base_url=Config.NIM_GATEWAY_BASE_URL,
+    timeout=120,
+) if Config.NIM_GATEWAY_API_KEY and Config.NIM_GATEWAY_BASE_URL else None
+
 MIMO_CLIENT = OpenAI(
     api_key=Config.MIMO_API_KEY,
     base_url=Config.MIMO_BASE_URL,
@@ -34,6 +40,15 @@ def _normalize_text(value: Any) -> str:
         return ""
     return str(value)
 
+
+
+
+def _is_error_action_payload(text: str) -> bool:
+    normalized = _normalize_text(text).strip().lower()
+    if not normalized:
+        return True
+    compact = "".join(normalized.split())
+    return '"action":"error"' in compact
 
 def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
