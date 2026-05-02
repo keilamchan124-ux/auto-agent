@@ -1,0 +1,23 @@
+name: prompt-tool-registry-consistency
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master, work ]
+
+jobs:
+  consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Prompt/tool registry gate
+        run: |
+          pytest -q tests/test_regression_stability.py::PromptRegistryConsistencyTests::test_prompt_actions_exist_in_registry
+

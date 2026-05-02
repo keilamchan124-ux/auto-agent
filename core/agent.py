@@ -15,6 +15,13 @@ import platform
 from core.config import Config
 from core import llm
 from core import tools
+from core import telemetry
+from core import policy
+from core import mcp_registry
+from core import recovery
+from core import rescue_orchestrator
+from core.state_trace import StateTraceManager
+from core.policy_gate import PolicyGate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -41,6 +48,8 @@ class AgentState:
     root_dir: str = ""
     path_aliases: Dict[str, str] = field(default_factory=dict)
     force_repair_mode: bool = False
+    completion_lock_enabled: bool = True
+    execution_mode: str = "skill_first"
 
 class Agent:
     def __init__(self):
@@ -48,6 +57,9 @@ class Agent:
         self.current_task_id = None
         self.current_step = 0
         self.rescue_cooldown = 0
+        self.current_task_text = ""
+        self.state_trace = StateTraceManager(Config.WORKSPACE_DIR)
+        self.policy_gate = PolicyGate()
         self.load_state()
 
     def load_state(self):
@@ -133,60 +145,17 @@ Task executed successfully.
         last_result_ok: Optional[bool] = None,
         status: str = "running",
     ) -> None:
-        progress_path = Config.WORKSPACE_DIR / "artifacts" / "runtime_progress.json"
-        progress_path.parent.mkdir(parents=True, exist_ok=True)
-        progress = {
-            "task_id": self.current_task_id,
-            "task_preview": task[:200],
-            "status": status,
-            "phase": phase,
-            "step": step,
-            "max_steps": max_steps,
-            "progress_pct": round((step / max_steps) * 100, 2) if max_steps > 0 else 0,
-            "current_action": current_action,
-            "last_result_ok": last_result_ok,
-            "state": {
-                "repeat_count": self.state.repeat_count,
-                "parse_fail_count": self.state.parse_fail_count,
-                "search_count": self.state.search_count,
-                "error_count": self.state.error_count,
-                "plan_executed_count": self.state.plan_executed_count,
-                "task_mode": self.state.task_mode,
-                "last_action": self.state.last_action,
-                "last_error": self.state.last_error,
-                "quality_gate_web_warning_count": self.state.quality_gate_web_warning_count,
-            },
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), "utf-8")
+        self.state_trace.update_runtime_progress(self, task, step, max_steps, phase, current_action, last_result_ok, status)
 
     def append_trace(self, action: str, kwargs: dict, result: dict):
-        trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
-        task_trace_dir = Config.WORKSPACE_DIR / "artifacts" / "traces"
-        task_trace_dir.mkdir(parents=True, exist_ok=True)
-
-        compact_kwargs = kwargs if isinstance(kwargs, dict) else {}
-        compact_result = result if isinstance(result, dict) else {}
-        trace_entry = {
+        self.state_trace.append_trace(self, action, kwargs, result)
+        self._write_task_summary_index({
             "task_id": self.current_task_id or "unknown",
             "step": self.current_step,
             "time": time.time(),
             "action": action,
-            "kwargs": compact_kwargs,
-            "result": {
-                "ok": bool(compact_result.get("ok", False)),
-                "message": str(compact_result.get("message", ""))[:400],
-                "error_type": compact_result.get("error_type"),
-            }
-        }
-
-        with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-        task_trace_path = task_trace_dir / f"{self.current_task_id}.jsonl"
-        with open(task_trace_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-        self._rotate_global_trace_if_needed(trace_path)
-        self._write_task_summary_index(trace_entry)
+            "result": result if isinstance(result, dict) else {},
+        })
 
     def _rotate_global_trace_if_needed(self, trace_path, max_bytes: int = 5_000_000) -> None:
         try:
@@ -425,27 +394,132 @@ Task executed successfully.
             self.state.repeat_count = 1
 
     def should_force_rescue(self) -> bool:
-        """
-        Error-type specific recovery policies:
-        - severe/tool-parameter errors: immediate rescue
-        - runtime errors: allow limited retries, then rescue
-        - format errors: handled after repeated parse failures
-        - repeated-action loops
-        - search loops
-        """
-        if self.state.error_count >= 3:
-            return True
-        if self.state.parse_fail_count >= 2:
-            return True
-        if self.state.repeat_count >= 2:
-            return True
-        if self.state.search_count >= 4:
-            return True
-        return False
+        return recovery.should_force_rescue(
+            error_count=self.state.error_count,
+            repeat_count=self.state.repeat_count,
+            parse_fail_count=self.state.parse_fail_count,
+            hard_reset_count=self.state.hard_reset_count,
+        ) or self.state.search_count >= 4
 
     def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
         """Early-stop heuristics disabled; never stop early."""
         return False
+
+    def _is_ui_verify_phase(self, step: int) -> bool:
+        # Semantic trigger first: if task/checklist explicitly asks for visual verification.
+        semantic_triggers = ["ui verify", "visual verify", "screenshot", "browser validation", "web validation"]
+        task_text = (self.current_task_text or "").lower()
+        if any(k in task_text for k in semantic_triggers):
+            return True
+        todo_text = ""
+        try:
+            if Config.TODO_FILE.exists():
+                todo_text = Config.TODO_FILE.read_text("utf-8", errors="replace").lower()
+        except Exception:
+            todo_text = ""
+        if any(k in todo_text for k in semantic_triggers):
+            return True
+
+        # Cadence fallback for stitch mode.
+        if self.state.task_mode != "stitch_flutter":
+            return False
+        mod = step % 10
+        return mod in (8, 9, 0)
+
+    def _enforce_mcp_phase_hard_gate(self, action: str, step: int) -> tuple[bool, str]:
+        browser_like_actions = {"capture_web_screenshot", "start_web_server", "stop_web_server", "web_server_status"}
+        if action in browser_like_actions and not self._is_ui_verify_phase(step):
+            return False, (
+                "MCP_PHASE_POLICY_VIOLATION: Browser/UI verification tools are only allowed in UI verify phase "
+                "(Stitch cadence steps 8/9/10). Continue with implementation-phase actions first."
+            )
+        return True, ""
+
+    def _enforce_completion_lock(self, action: str, kwargs: Dict[str, Any]) -> tuple[bool, str]:
+        if action != "write_file" or not self.state.completion_lock_enabled:
+            return True, ""
+        path = str(kwargs.get("path", "")).replace("\\", "/")
+        protected_names = {"calc.py", "test_calc.py"}
+        if not any(path.endswith(f"/{name}") or path == name for name in protected_names):
+            return True, ""
+        parent = "/".join(path.split("/")[:-1]) if "/" in path else "."
+        report_path = f"{parent}/REPORT.md" if parent != "." else "REPORT.md"
+        try:
+            rp = tools.safe_path(report_path)
+            if rp.exists():
+                return False, (
+                    "COMPLETION_LOCK: REPORT.md already exists for this task scope; "
+                    "writes to calc.py/test_calc.py are locked. Only report updates or mark_done are allowed."
+                )
+        except Exception:
+            pass
+        return True, ""
+
+    def _build_mcp_routing_directive(self, task: str, enabled_mcps: List[Dict[str, str]]) -> str:
+        names = {m.get("name", "").lower() for m in enabled_mcps}
+        t = (task or "").lower()
+        directives = []
+        if "context7" in names and any(k in t for k in ["docs", "documentation", "api", "sdk", "reference"]):
+            directives.append("Use Context7 MCP early for source-grounded documentation lookups.")
+        if "github" in names and any(k in t for k in ["pr", "pull request", "issue", "repository", "github"]):
+            directives.append("Use GitHub MCP early for repository/PR/issue context.")
+        if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build"]):
+            directives.append("Use CodeGeneratorMCP in implementation phase for scaffolding/patch acceleration.")
+        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "console", "screenshot", "visual"]):
+            directives.append("Use Chrome DevTools MCP during UI verify phase only.")
+        if "semgrep" in names and any(k in t for k in ["security", "vulnerability", "hardening", "injection"]):
+            directives.append("Run Semgrep MCP checks before mark_done for security-sensitive tasks.")
+        if not directives:
+            return ""
+        return "[MCP ROUTING DIRECTIVE]\n" + "\n".join([f"- {d}" for d in directives])
+
+    def _enforce_mcp_usage_floor(self, action: str, step: int, task: str, enabled_mcps: List[Dict[str, str]]) -> tuple[bool, str]:
+        """
+        Require at least one MCP-correlated action early when task semantics strongly suggest it.
+        This reduces passive MCP exposure where routing hints are ignored.
+        """
+        if step > 8:
+            return True, ""
+        names = {m.get("name", "").lower() for m in enabled_mcps}
+        t = (task or "").lower()
+        if "github" in names and any(k in t for k in ["github", "repository", "repo", "pull request", "pr", "issue"]):
+            github_actions = {"github_read_file", "github_clone", "github_create_pr", "github_commit_push"}
+            if action not in github_actions and action not in {"plan", "read_file"}:
+                return False, (
+                    "MCP_USAGE_REQUIRED: This task is repository-centric. Use a GitHub MCP action early "
+                    "(github_read_file/github_clone/github_create_pr/github_commit_push) before generic actions."
+                )
+        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "screenshot", "visual"]):
+            ui_actions = {"capture_web_screenshot", "web_server_status", "start_web_server"}
+            if action not in ui_actions and action not in {"plan", "run_cmd", "read_file"}:
+                return False, (
+                    "MCP_USAGE_REQUIRED: This task is UI-centric. Use a UI verification action early "
+                    "(start_web_server/capture_web_screenshot/web_server_status)."
+                )
+        return True, ""
+
+    def _determine_execution_mode(self, step: int) -> str:
+        """
+        Unify Skills and MCP usage to avoid mixed noisy behavior.
+        - skill_first: planning/implementation/debug
+        - mcp_first: UI verification windows
+        """
+        return "mcp_first" if self._is_ui_verify_phase(step) else "skill_first"
+
+    def _build_coordination_directive(self, mode: str) -> str:
+        if mode == "mcp_first":
+            return (
+                "[COORDINATION MODE: MCP_FIRST]\n"
+                "- Use MCP tools first for verification tasks.\n"
+                "- Do NOT load or switch skills unless MCP evidence is insufficient.\n"
+                "- Preferred MCP set: chrome-devtools, web-visual-feedback."
+            )
+        return (
+            "[COORDINATION MODE: SKILL_FIRST]\n"
+            "- Use loaded skills and local tools first for implementation.\n"
+            "- Do NOT call browser/visual MCP tools in this mode.\n"
+            "- Only switch to MCP_FIRST when entering explicit UI verify steps."
+        )
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
         """
@@ -497,6 +571,10 @@ Task executed successfully.
         elif action == "run_cmd" and "cmd" not in kwargs:
             if "command" in kwargs:
                 kwargs["cmd"] = str(kwargs.pop("command"))
+                fixed = True
+        elif action == "run_python_script" and "code" not in kwargs:
+            if "script" in kwargs:
+                kwargs["code"] = str(kwargs.pop("script"))
                 fixed = True
                 
         if fixed:
@@ -647,6 +725,7 @@ Task executed successfully.
         self.reset_counters()
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
+        self.current_task_text = task
         self.state.task_mode = self._detect_task_mode(task)
         self.state.shell_profile = "windows" if os.name == "nt" else "unix"
         self.state.root_dir = str(Config.WORKSPACE_DIR)
@@ -670,10 +749,27 @@ Task executed successfully.
             "role": "user",
             "content": (
                 f"ENV CACHE LOCKED ONCE: shell_profile={self.state.shell_profile}, root_dir={self.state.root_dir}. "
-                "Do not use ls/dir. For project listing, use run_python_script with "
-                "`import os; print(os.listdir('demo_counter_app'))`."
+                "Prefer workspace-safe commands and keep tool arguments exact."
             ),
         })
+
+        enabled_mcps = mcp_registry.get_enabled_mcp_registry()
+        if enabled_mcps:
+            mcp_lines = "\n".join([f"- {m['name']}: {m['role']}" for m in enabled_mcps])
+            msgs[0]["content"] += (
+                "\n\n[MCP REGISTRY]\n"
+                "Registered MCP servers (use selectively based on task phase):\n"
+                f"{mcp_lines}"
+            )
+            msgs[0]["content"] += (
+                "\n\n[MCP PHASE POLICY - ENFORCED]\n"
+                "1) Implementation phase (default): prioritize `context7` + `github` + `codegeneratormcp`.\n"
+                "2) UI verify phase: use `chrome-devtools`/`web-visual-feedback` only when visual/runtime verification is required.\n"
+                "3) Do NOT call browser MCP tools during pure implementation/debug steps unless task explicitly asks for UI verification.\n"
+            )
+            routing = self._build_mcp_routing_directive(task, enabled_mcps)
+            if routing:
+                msgs[0]["content"] += "\n\n" + routing
 
         # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)
@@ -692,11 +788,18 @@ Task executed successfully.
         execution_budget = 40
 
         recent_actions: List[str] = []
+        last_mode = None
         for step in range(1, max_steps + 1):
             self.current_step = step
             logger.info("🧠 Step %s/%s", step, max_steps)
             phase = "execution" if step <= execution_budget else "planning"
             self._update_runtime_progress(task, step, max_steps, phase=phase)
+            mode = self._determine_execution_mode(step)
+            if mode != last_mode:
+                self.state.execution_mode = mode
+                self.save_state()
+                msgs.append({"role": "user", "content": self._build_coordination_directive(mode)})
+                last_mode = mode
 
             # E: if too stuck, hard reset once
             if self.hard_reset_if_needed(msgs):
@@ -749,17 +852,16 @@ Task executed successfully.
                         "content": error_summary_prompt
                     })
                     
-                    try:
-                        rescue_text = llm.call_gemini_rescue(
-                            self.trim_history(msgs), 
-                            stuck_reason=stuck_reason
-                        )
-                    except Exception as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
-                            rescue_text = self._simple_fallback_plan()
-                        else:
-                            raise e
+                    rescue_text = rescue_orchestrator.run_rescue(
+                        trim_history_fn=self.trim_history,
+                        msgs=msgs,
+                        stuck_reason=stuck_reason,
+                        simple_fallback_plan_fn=self._simple_fallback_plan,
+                        workspace_dir=Config.WORKSPACE_DIR,
+                        run_id=self.current_task_id or "",
+                        task_id=self.current_task_id or "",
+                        step=step,
+                    )
 
                     self.rescue_cooldown = 3   # After rescue, skip rescue for next 3 steps.
                     
@@ -797,17 +899,16 @@ Task executed successfully.
                     })
                 else:
                     logger.warning("🆘 Too many format failures, forcing rescue...")
-                    try:
-                        rescue_text = llm.call_gemini_rescue(
-                            self.trim_history(msgs), 
-                            stuck_reason="FORMAT ERROR: Agent failed to return valid JSON multiple times."
-                        )
-                    except Exception as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
-                            rescue_text = self._simple_fallback_plan()
-                        else:
-                            raise e
+                    rescue_text = rescue_orchestrator.run_rescue(
+                        trim_history_fn=self.trim_history,
+                        msgs=msgs,
+                        stuck_reason="FORMAT ERROR: Agent failed to return valid JSON multiple times.",
+                        simple_fallback_plan_fn=self._simple_fallback_plan,
+                        workspace_dir=Config.WORKSPACE_DIR,
+                        run_id=self.current_task_id or "",
+                        task_id=self.current_task_id or "",
+                        step=step,
+                    )
 
                     parsed = self.extract_json(rescue_text)
                     self.state.parse_fail_count = 0
@@ -826,6 +927,24 @@ Task executed successfully.
             kwargs = parsed.get("kwargs", {})
             if not isinstance(kwargs, dict):
                 kwargs = {}
+            allowed, policy_msg = self._enforce_mcp_phase_hard_gate(str(action), step)
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": policy_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": policy_msg, "error_type": "policy_error"})
+                continue
+            allowed, lock_msg = self._enforce_completion_lock(str(action), kwargs)
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": lock_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": lock_msg, "error_type": "policy_error"})
+                continue
+            allowed, mcp_msg = self._enforce_mcp_usage_floor(str(action), step, task, enabled_mcps if enabled_mcps else [])
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": mcp_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": mcp_msg, "error_type": "policy_error"})
+                continue
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
             if self.state.force_repair_mode and action == "plan":
@@ -1020,17 +1139,7 @@ Task executed successfully.
             )
 
     def _detect_task_mode(self, task: str) -> str:
-        """
-        Detect task mode from explicit schema header.
-        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
-        """
-        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
-        if not match:
-            return "general"
-        mode = match.group(1).strip().upper()
-        if mode in {"STITCH_FLUTTER", "MOBILE"}:
-            return "mobile"
-        return "general"
+        return policy.detect_task_mode(task)
 
     def start(self):
         logger.info("🤖 Agent V7.2 Active.")
@@ -1053,15 +1162,3 @@ Task executed successfully.
 
 if __name__ == "__main__":
     Agent().start()
-    def _detect_task_mode(self, task: str) -> str:
-        """
-        Detect task mode from explicit schema header.
-        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
-        """
-        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
-        if not match:
-            return "general"
-        mode = match.group(1).strip().upper()
-        if mode in {"STITCH_FLUTTER", "MOBILE"}:
-            return "mobile"
-        return "general"
