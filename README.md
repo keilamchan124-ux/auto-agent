@@ -9,10 +9,18 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
    ```bash
    pip install -r requirements.txt
    ```
-3. Configure `.env` (at least `MIMO_API_KEY`; set `GEMINI_API_KEY` only if using Gemini rescue backend).
-   - Optional rescue switch:
-     - `RESCUE_BACKEND=gemini` with `RESCUE_MODEL=gemini-3-flash-preview`
-     - `RESCUE_BACKEND=mimo` with `RESCUE_MODEL=gemma-4-31b-it` (or another model available on your MIMO/OpenAI-compatible endpoint)
+3. Configure `.env` (at least `MIMO_API_KEY`; optionally configure NIM gateway + Gemini for rescue chain).
+   - Quick start: copy `.env.example` to `.env` and fill your real keys.
+   - Rescue fallback order is fixed: `GLM-4.7 > Gemini 3.1 flash lite > Gemma 4`.
+   - Configure GLM via NIM gateway bridge:
+     - `NIM_API_KEY=...`
+     - `NIM_BASE_URL=https://integrate.api.nvidia.com/v1`
+     - `NIM_RESCUE_MODEL=glm-4.7`
+   - Configure Gemini fallback:
+     - `GEMINI_API_KEY=...`
+     - `GEMINI_MODEL=gemini-3.1-flash-lite-preview`
+   - Configure Gemma fallback on MIMO/OpenAI-compatible endpoint:
+     - `RESCUE_MODEL=gemma-4-31b-it`
 4. Run:
    ```bash
    python main.py
