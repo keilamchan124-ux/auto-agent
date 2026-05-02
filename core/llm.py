@@ -25,6 +25,17 @@ def _classify_error_code(text: str) -> str:
         return "http_error"
     return "backend_unavailable"
 
+
+def get_rescue_decision(error_code: str) -> dict:
+    matrix = {
+        "auth_error": {"action": "run_cmd", "kwargs": {"cmd": "env | sort"}, "reason": "verify credential env configuration"},
+        "not_found": {"action": "read_file", "kwargs": {"path": ".env.example"}, "reason": "check configured model/endpoint names"},
+        "rate_limited": {"action": "plan", "kwargs": {"steps": "1. Backoff\n2. Reduce request burst\n3. Retry with fallback backend"}, "reason": "explicit rate-limit recovery"},
+        "http_error": {"action": "web_search", "kwargs": {"q": "provider status page outage"}, "reason": "check upstream incident before retry"},
+        "backend_unavailable": {"action": "run_python_script", "kwargs": {"code": "print('retry_with_fallback_backend')"}, "reason": "switch provider and continue"},
+    }
+    return matrix.get(error_code, matrix["backend_unavailable"])
+
 GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
 NIM_GATEWAY_CLIENT = OpenAI(
@@ -86,6 +97,12 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
 
     if stuck_reason:
         rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
+        code = _classify_error_code(stuck_reason)
+        decision = get_rescue_decision(code)
+        rescue_prompt += (
+            f"Decision matrix code={code}.\n"
+            f"Preferred next action={decision['action']} kwargs={decision['kwargs']} reason={decision['reason']}.\n"
+        )
 
         if "FORMAT" in stuck_reason or "JSON" in stuck_reason:
             rescue_prompt += (

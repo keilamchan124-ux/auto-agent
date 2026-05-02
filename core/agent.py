@@ -20,6 +20,8 @@ from core import policy
 from core import mcp_registry
 from core import recovery
 from core import rescue_orchestrator
+from core.state_trace import StateTraceManager
+from core.policy_gate import PolicyGate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -46,6 +48,8 @@ class AgentState:
     root_dir: str = ""
     path_aliases: Dict[str, str] = field(default_factory=dict)
     force_repair_mode: bool = False
+    completion_lock_enabled: bool = True
+    execution_mode: str = "skill_first"
 
 class Agent:
     def __init__(self):
@@ -54,6 +58,8 @@ class Agent:
         self.current_step = 0
         self.rescue_cooldown = 0
         self.current_task_text = ""
+        self.state_trace = StateTraceManager(Config.WORKSPACE_DIR)
+        self.policy_gate = PolicyGate()
         self.load_state()
 
     def load_state(self):
@@ -139,56 +145,17 @@ Task executed successfully.
         last_result_ok: Optional[bool] = None,
         status: str = "running",
     ) -> None:
-        telemetry.update_runtime_progress(
-            Config.WORKSPACE_DIR,
-            task_id=self.current_task_id,
-            task=task,
-            step=step,
-            max_steps=max_steps,
-            phase=phase,
-            current_action=current_action,
-            last_result_ok=last_result_ok,
-            status=status,
-            state_snapshot={
-                "repeat_count": self.state.repeat_count,
-                "parse_fail_count": self.state.parse_fail_count,
-                "search_count": self.state.search_count,
-                "error_count": self.state.error_count,
-                "plan_executed_count": self.state.plan_executed_count,
-                "task_mode": self.state.task_mode,
-                "last_action": self.state.last_action,
-                "last_error": self.state.last_error,
-                "quality_gate_web_warning_count": self.state.quality_gate_web_warning_count,
-            },
-        )
+        self.state_trace.update_runtime_progress(self, task, step, max_steps, phase, current_action, last_result_ok, status)
 
     def append_trace(self, action: str, kwargs: dict, result: dict):
-        trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
-        task_trace_dir = Config.WORKSPACE_DIR / "artifacts" / "traces"
-        task_trace_dir.mkdir(parents=True, exist_ok=True)
-
-        compact_kwargs = kwargs if isinstance(kwargs, dict) else {}
-        compact_result = result if isinstance(result, dict) else {}
-        trace_entry = {
+        self.state_trace.append_trace(self, action, kwargs, result)
+        self._write_task_summary_index({
             "task_id": self.current_task_id or "unknown",
             "step": self.current_step,
             "time": time.time(),
             "action": action,
-            "kwargs": compact_kwargs,
-            "result": {
-                "ok": bool(compact_result.get("ok", False)),
-                "message": str(compact_result.get("message", ""))[:400],
-                "error_type": compact_result.get("error_type"),
-            }
-        }
-
-        with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-        task_trace_path = task_trace_dir / f"{self.current_task_id}.jsonl"
-        with open(task_trace_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-        telemetry.rotate_global_trace_if_needed(Config.WORKSPACE_DIR, trace_path)
-        self._write_task_summary_index(trace_entry)
+            "result": result if isinstance(result, dict) else {},
+        })
 
     def _rotate_global_trace_if_needed(self, trace_path, max_bytes: int = 5_000_000) -> None:
         try:
@@ -468,6 +435,67 @@ Task executed successfully.
             )
         return True, ""
 
+    def _enforce_completion_lock(self, action: str, kwargs: Dict[str, Any]) -> tuple[bool, str]:
+        if action != "write_file" or not self.state.completion_lock_enabled:
+            return True, ""
+        path = str(kwargs.get("path", "")).replace("\\", "/")
+        protected_names = {"calc.py", "test_calc.py"}
+        if not any(path.endswith(f"/{name}") or path == name for name in protected_names):
+            return True, ""
+        parent = "/".join(path.split("/")[:-1]) if "/" in path else "."
+        report_path = f"{parent}/REPORT.md" if parent != "." else "REPORT.md"
+        try:
+            rp = tools.safe_path(report_path)
+            if rp.exists():
+                return False, (
+                    "COMPLETION_LOCK: REPORT.md already exists for this task scope; "
+                    "writes to calc.py/test_calc.py are locked. Only report updates or mark_done are allowed."
+                )
+        except Exception:
+            pass
+        return True, ""
+
+    def _build_mcp_routing_directive(self, task: str, enabled_mcps: List[Dict[str, str]]) -> str:
+        names = {m.get("name", "").lower() for m in enabled_mcps}
+        t = (task or "").lower()
+        directives = []
+        if "context7" in names and any(k in t for k in ["docs", "documentation", "api", "sdk", "reference"]):
+            directives.append("Use Context7 MCP early for source-grounded documentation lookups.")
+        if "github" in names and any(k in t for k in ["pr", "pull request", "issue", "repository", "github"]):
+            directives.append("Use GitHub MCP early for repository/PR/issue context.")
+        if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build"]):
+            directives.append("Use CodeGeneratorMCP in implementation phase for scaffolding/patch acceleration.")
+        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "console", "screenshot", "visual"]):
+            directives.append("Use Chrome DevTools MCP during UI verify phase only.")
+        if "semgrep" in names and any(k in t for k in ["security", "vulnerability", "hardening", "injection"]):
+            directives.append("Run Semgrep MCP checks before mark_done for security-sensitive tasks.")
+        if not directives:
+            return ""
+        return "[MCP ROUTING DIRECTIVE]\n" + "\n".join([f"- {d}" for d in directives])
+
+    def _determine_execution_mode(self, step: int) -> str:
+        """
+        Unify Skills and MCP usage to avoid mixed noisy behavior.
+        - skill_first: planning/implementation/debug
+        - mcp_first: UI verification windows
+        """
+        return "mcp_first" if self._is_ui_verify_phase(step) else "skill_first"
+
+    def _build_coordination_directive(self, mode: str) -> str:
+        if mode == "mcp_first":
+            return (
+                "[COORDINATION MODE: MCP_FIRST]\n"
+                "- Use MCP tools first for verification tasks.\n"
+                "- Do NOT load or switch skills unless MCP evidence is insufficient.\n"
+                "- Preferred MCP set: chrome-devtools, web-visual-feedback."
+            )
+        return (
+            "[COORDINATION MODE: SKILL_FIRST]\n"
+            "- Use loaded skills and local tools first for implementation.\n"
+            "- Do NOT call browser/visual MCP tools in this mode.\n"
+            "- Only switch to MCP_FIRST when entering explicit UI verify steps."
+        )
+
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
         """
         E: hard reset when stuck too long.
@@ -714,6 +742,9 @@ Task executed successfully.
                 "2) UI verify phase: use `chrome-devtools`/`web-visual-feedback` only when visual/runtime verification is required.\n"
                 "3) Do NOT call browser MCP tools during pure implementation/debug steps unless task explicitly asks for UI verification.\n"
             )
+            routing = self._build_mcp_routing_directive(task, enabled_mcps)
+            if routing:
+                msgs[0]["content"] += "\n\n" + routing
 
         # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)
@@ -732,11 +763,18 @@ Task executed successfully.
         execution_budget = 40
 
         recent_actions: List[str] = []
+        last_mode = None
         for step in range(1, max_steps + 1):
             self.current_step = step
             logger.info("🧠 Step %s/%s", step, max_steps)
             phase = "execution" if step <= execution_budget else "planning"
             self._update_runtime_progress(task, step, max_steps, phase=phase)
+            mode = self._determine_execution_mode(step)
+            if mode != last_mode:
+                self.state.execution_mode = mode
+                self.save_state()
+                msgs.append({"role": "user", "content": self._build_coordination_directive(mode)})
+                last_mode = mode
 
             # E: if too stuck, hard reset once
             if self.hard_reset_if_needed(msgs):
@@ -869,6 +907,12 @@ Task executed successfully.
                 self.state.error_count += 1
                 msgs.append({"role": "user", "content": policy_msg})
                 self.append_trace(str(action), kwargs, {"ok": False, "message": policy_msg, "error_type": "policy_error"})
+                continue
+            allowed, lock_msg = self._enforce_completion_lock(str(action), kwargs)
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": lock_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": lock_msg, "error_type": "policy_error"})
                 continue
 
             kwargs = self._auto_fix_kwargs(action, kwargs)

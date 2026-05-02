@@ -90,6 +90,18 @@ def safe_path(p: str) -> Path:
     return full
 
 
+def _canonicalize_workspace_path(path: str) -> str:
+    """
+    Normalize duplicated workspace prefixes:
+    - workspace/workspace/foo -> workspace/foo
+    - workspace\\workspace\\foo -> workspace/foo
+    """
+    normalized = str(path).replace("\\", "/")
+    while normalized.startswith("workspace/workspace/"):
+        normalized = normalized[len("workspace/"):]
+    return normalized
+
+
 def _truncate(text: str, limit: int) -> str:
     text = text or ""
     return text if len(text) <= limit else text[:limit]
@@ -256,9 +268,20 @@ def run_cmd(cmd: str) -> str:
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
+            if binary == "mkdir" and len(args) >= 3 and args[1] == "-p":
+                target = _canonicalize_workspace_path(" ".join(args[2:]).strip("\"'"))
+                py = f"import os; os.makedirs(r'''{target}''', exist_ok=True); print('ok')"
+                cmd = f'python -c "{py}"'
+                binary = "python"
             if binary == "ls":
                 binary = "dir"
                 cmd = "dir" if len(args) == 1 else f"dir {' '.join(args[1:])}"
+            elif binary == "cat" and "<<" in cmd:
+                return format_result(
+                    False,
+                    "Heredoc pattern is not supported on Windows run_cmd. Use write_file(path=..., content=...) instead.",
+                    error_type="policy_error",
+                )
             elif binary == "cat":
                 binary = "type"
                 cmd = "type" if len(args) == 1 else f"type {' '.join(args[1:])}"
@@ -403,6 +426,7 @@ def run_cmd(cmd: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     try:
+        path = _canonicalize_workspace_path(path)
         normalized = str(path).replace("\\", "/")
         cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
         if cwd.endswith("/workspace") and normalized.startswith("workspace/demo_counter_app"):
@@ -419,6 +443,7 @@ def read_file(path: str, full_output: bool = True) -> str:
     try:
         if not path:
             return format_result(False, "Empty path.", error_type="io_error")
+        path = _canonicalize_workspace_path(path)
         normalized = str(path).replace("\\", "/")
         cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
         if cwd.endswith("/workspace") and normalized.startswith("workspace/"):
@@ -492,7 +517,12 @@ socket.socket.connect = _safe_connect
 
         out = (r.stdout + "\n" + r.stderr).strip() or "Success (No output)"
         if r.returncode != 0:
-            return format_result(False, _truncate(out, 12000), error_type="execution_error")
+            stderr_lines = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+            last_stderr = stderr_lines[-1] if stderr_lines else ""
+            detail = f"returncode={r.returncode}"
+            if last_stderr:
+                detail += f"; last_stderr={last_stderr}"
+            return format_result(False, _truncate(f"{detail}\n{out}", 12000), error_type="execution_error")
         if full_output:
             return format_result(True, _truncate(out, 12000), data={"mode": "full"})
         top20 = "\n".join(out.splitlines()[:20])

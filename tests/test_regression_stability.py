@@ -212,6 +212,25 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         self.assertIn("semgrep", names)
         self.assertEqual(names.count("chrome-devtools"), 1)
 
+    def test_workspace_path_canonicalizer(self):
+        self.assertEqual(core_tools._canonicalize_workspace_path("workspace/workspace/demo/x.py"), "workspace/demo/x.py")
+        self.assertEqual(core_tools._canonicalize_workspace_path("workspace\\workspace\\demo\\x.py"), "workspace/demo/x.py")
+
+    def test_rescue_decision_matrix_returns_predictable_actions(self):
+        import core.llm as core_llm
+        self.assertEqual(core_llm.get_rescue_decision("auth_error")["action"], "run_cmd")
+        self.assertEqual(core_llm.get_rescue_decision("not_found")["action"], "read_file")
+        self.assertEqual(core_llm.get_rescue_decision("rate_limited")["action"], "plan")
+
+    def test_policy_gate_phase_and_completion_lock(self):
+        from core.policy_gate import PolicyGate
+        gate = PolicyGate(phase_window=3)
+        self.assertTrue(gate.is_ui_verify_phase(3))
+        self.assertFalse(gate.is_ui_verify_phase(2))
+        self.assertTrue(gate.enforce_mcp_phase_hard_gate("capture_web_screenshot", True))
+        self.assertFalse(gate.enforce_mcp_phase_hard_gate("download_file", True))
+        self.assertFalse(gate.enforce_completion_lock("mark_done", True))
+
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
 class SmokeIntegrationTests(unittest.TestCase):
