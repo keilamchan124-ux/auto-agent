@@ -482,13 +482,13 @@ Task executed successfully.
             return True, ""
         names = {m.get("name", "").lower() for m in enabled_mcps}
         t = (task or "").lower()
+        # Keep repo intent strict to avoid false positives from generic words
+        # in long prompts (e.g., "PR title" metadata in unrelated tasks).
         repo_signals = [
             r"\bgithub\b",
-            r"\brepository\b",
-            r"\brepo\b",
+            r"github\.com/",
+            r"\bowner/[a-z0-9_.-]+\b",
             r"\bpull request\b",
-            r"\bpr\b",
-            r"\bissue\b",
         ]
         has_repo_signal = any(re.search(p, t) for p in repo_signals)
         if "github" in names and has_repo_signal:

@@ -242,6 +242,8 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         self.assertIn("MCP_USAGE_REQUIRED", msg2)
         ok3, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "generate REPORT.md with final status", enabled)
         self.assertTrue(ok3)
+        ok4, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "previous PR title and issue summary text only", enabled)
+        self.assertTrue(ok4)
 
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
