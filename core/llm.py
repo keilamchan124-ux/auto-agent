@@ -10,6 +10,20 @@ import requests
 from core.config import Config
 
 logger = logging.getLogger("LLM")
+LAST_RESCUE_EVENTS: list[dict] = []
+
+
+def _classify_error_code(text: str) -> str:
+    t = (text or "").lower()
+    if "401" in t or "403" in t or "auth" in t:
+        return "auth_error"
+    if "404" in t or "not found" in t:
+        return "not_found"
+    if "429" in t or "rate limit" in t or "resource_exhausted" in t:
+        return "rate_limited"
+    if "http" in t:
+        return "http_error"
+    return "backend_unavailable"
 
 GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
@@ -112,21 +126,72 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
     contents.append({"role": "user", "parts": [{"text": rescue_prompt}]})
 
     # Priority chain: GLM-4.7 (NVIDIA NIM) > Gemini > Gemma 4 (MIMO/OpenAI-compatible)
+    LAST_RESCUE_EVENTS.clear()
     nim_err = None
     try:
-        return _call_nim_rescue(contents, retries=retries)
+        t0 = time.time()
+        out = _call_nim_rescue(contents, retries=retries)
+        LAST_RESCUE_EVENTS.append({
+            "backend": "nim_glm",
+            "status": "success",
+            "error_code": "none",
+            "attempt": retries + 1,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "detail": "success",
+        })
+        return out
     except Exception as e:
         nim_err = e
+        LAST_RESCUE_EVENTS.append({
+            "backend": "nim_glm",
+            "status": "failed",
+            "error_code": _classify_error_code(str(e)),
+            "attempt": retries + 1,
+            "latency_ms": 0,
+            "detail": str(e),
+        })
         logger.warning("GLM rescue unavailable, fallback to Gemini: %s", e)
 
     try:
-        return _call_gemini_rescue(contents, retries=retries)
+        t0 = time.time()
+        out = _call_gemini_rescue(contents, retries=retries)
+        LAST_RESCUE_EVENTS.append({
+            "backend": "gemini",
+            "status": "success",
+            "error_code": "none",
+            "attempt": retries + 1,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "detail": "success",
+        })
+        return out
     except Exception as e:
+        LAST_RESCUE_EVENTS.append({
+            "backend": "gemini",
+            "status": "failed",
+            "error_code": _classify_error_code(str(e)),
+            "attempt": retries + 1,
+            "latency_ms": 0,
+            "detail": str(e),
+        })
         logger.warning("Gemini rescue unavailable, fallback to Gemma 4: %s", e)
         if nim_err:
             logger.debug("Earlier GLM/NIM error: %s", nim_err)
 
-    return _call_mimo_rescue(contents, retries=retries)
+    t0 = time.time()
+    out = _call_mimo_rescue(contents, retries=retries)
+    LAST_RESCUE_EVENTS.append({
+        "backend": "mimo_gemma",
+        "status": "fallback_used",
+        "error_code": "none",
+        "attempt": retries + 1,
+        "latency_ms": int((time.time() - t0) * 1000),
+        "detail": "fallback_used",
+    })
+    return out
+
+
+def get_last_rescue_events() -> list[dict]:
+    return list(LAST_RESCUE_EVENTS)
 
 
 def _call_nim_rescue(contents: list, retries: int = 2) -> str:
@@ -158,10 +223,24 @@ def _call_nim_rescue(contents: list, retries: int = 2) -> str:
 
     url = f"{Config.NIM_BASE_URL}/chat/completions"
     last_err = None
+    last_status = None
     for attempt in range(retries + 1):
         try:
             res = requests.post(url, json=payload, headers=headers, timeout=120)
-            res.raise_for_status()
+            last_status = res.status_code
+            if res.status_code >= 400:
+                detail = ""
+                try:
+                    detail = res.text[:500]
+                except Exception:
+                    detail = ""
+                if res.status_code in (401, 403):
+                    raise RuntimeError(f"NIM auth error ({res.status_code}): check NIM_API_KEY/permissions. {detail}")
+                if res.status_code == 404:
+                    raise RuntimeError(f"NIM endpoint/model not found (404): check NIM_BASE_URL/NIM_RESCUE_MODEL. {detail}")
+                if res.status_code == 429:
+                    raise RuntimeError(f"NIM rate limited (429): quota/concurrency exceeded. {detail}")
+                raise RuntimeError(f"NIM HTTP error ({res.status_code}). {detail}")
             data = res.json()
             return _normalize_text(data["choices"][0]["message"]["content"]).strip()
         except Exception as e:
@@ -170,7 +249,9 @@ def _call_nim_rescue(contents: list, retries: int = 2) -> str:
             if attempt < retries:
                 _sleep_backoff(attempt)
 
-    raise RuntimeError(f"GLM rescue failed: {last_err}")
+    if last_status is not None:
+        raise RuntimeError(f"GLM rescue failed after retries (status={last_status}): {last_err}")
+    raise RuntimeError(f"GLM rescue failed after retries: {last_err}")
 
 def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     if GEMINI_CLIENT is None:

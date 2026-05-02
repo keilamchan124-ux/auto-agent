@@ -2,6 +2,8 @@
 
 This playbook defines a reliable long-running Flutter workflow using Stitch design references.
 
+> Last updated: 2026-05-02 (UTC)
+
 ## 1) Required task schema
 
 Use this exact header in `todo.txt`:
@@ -32,6 +34,13 @@ Repeat until checklist is complete:
 2. `write_file` / `run_cmd`
 3. `run_cmd` for focused checks
 4. rely on runtime trace/progress artifacts
+
+Command note:
+- Use explicit pytest forms only in this repo:
+  - `pytest ...`
+  - `python -m pytest ...`
+  - `python3 -m pytest ...`
+- Avoid relying on implicit shell patterns for test execution.
 
 ### Phase C — Web visual validation loop
 1. `run_cmd` -> `flutter build web`
@@ -91,4 +100,25 @@ Expected artifacts:
 - `test-driven-development`
 - `code-review-and-quality`
 
+## 5.1 Recommended MCP stack for Stitch runs
+
+Use MCP selectively to avoid excessive tool overhead:
+
+- Always-on:
+  - `context7` (official docs / API references)
+  - `github` (repo/PR context)
+- On-demand (UI verification phases only):
+  - `chrome-devtools` (DOM/console/network/perf)
+  - `web-visual-feedback` (before/after screenshot checks)
+
+Suggested mapping by phase:
+
+- Phase A/B (planning/implementation): `context7`, `github`, `codegeneratormcp`
+- Phase C/D (visual/quality): add `chrome-devtools`, `web-visual-feedback`
+
+Enforcement note:
+- Follow runtime MCP phase policy from the agent system context; do not use browser MCP in pure implementation/debug steps unless UI verification is explicitly required.
+- UI verify phase can be triggered semantically by task/checklist language (e.g., `ui verify`, `screenshot`, `web validation`) in addition to cadence slots.
+
+## 6) Lowest-risk way to reduce model load (without reducing capability)
 

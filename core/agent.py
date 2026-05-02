@@ -17,6 +17,9 @@ from core import llm
 from core import tools
 from core import telemetry
 from core import policy
+from core import mcp_registry
+from core import recovery
+from core import rescue_orchestrator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -50,6 +53,7 @@ class Agent:
         self.current_task_id = None
         self.current_step = 0
         self.rescue_cooldown = 0
+        self.current_task_text = ""
         self.load_state()
 
     def load_state(self):
@@ -423,27 +427,46 @@ Task executed successfully.
             self.state.repeat_count = 1
 
     def should_force_rescue(self) -> bool:
-        """
-        Error-type specific recovery policies:
-        - severe/tool-parameter errors: immediate rescue
-        - runtime errors: allow limited retries, then rescue
-        - format errors: handled after repeated parse failures
-        - repeated-action loops
-        - search loops
-        """
-        if self.state.error_count >= 3:
-            return True
-        if self.state.parse_fail_count >= 2:
-            return True
-        if self.state.repeat_count >= 2:
-            return True
-        if self.state.search_count >= 4:
-            return True
-        return False
+        return recovery.should_force_rescue(
+            error_count=self.state.error_count,
+            repeat_count=self.state.repeat_count,
+            parse_fail_count=self.state.parse_fail_count,
+            hard_reset_count=self.state.hard_reset_count,
+        ) or self.state.search_count >= 4
 
     def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
         """Early-stop heuristics disabled; never stop early."""
         return False
+
+    def _is_ui_verify_phase(self, step: int) -> bool:
+        # Semantic trigger first: if task/checklist explicitly asks for visual verification.
+        semantic_triggers = ["ui verify", "visual verify", "screenshot", "browser validation", "web validation"]
+        task_text = (self.current_task_text or "").lower()
+        if any(k in task_text for k in semantic_triggers):
+            return True
+        todo_text = ""
+        try:
+            if Config.TODO_FILE.exists():
+                todo_text = Config.TODO_FILE.read_text("utf-8", errors="replace").lower()
+        except Exception:
+            todo_text = ""
+        if any(k in todo_text for k in semantic_triggers):
+            return True
+
+        # Cadence fallback for stitch mode.
+        if self.state.task_mode != "stitch_flutter":
+            return False
+        mod = step % 10
+        return mod in (8, 9, 0)
+
+    def _enforce_mcp_phase_hard_gate(self, action: str, step: int) -> tuple[bool, str]:
+        browser_like_actions = {"capture_web_screenshot", "start_web_server", "stop_web_server", "web_server_status"}
+        if action in browser_like_actions and not self._is_ui_verify_phase(step):
+            return False, (
+                "MCP_PHASE_POLICY_VIOLATION: Browser/UI verification tools are only allowed in UI verify phase "
+                "(Stitch cadence steps 8/9/10). Continue with implementation-phase actions first."
+            )
+        return True, ""
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
         """
@@ -649,6 +672,7 @@ Task executed successfully.
         self.reset_counters()
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
+        self.current_task_text = task
         self.state.task_mode = self._detect_task_mode(task)
         self.state.shell_profile = "windows" if os.name == "nt" else "unix"
         self.state.root_dir = str(Config.WORKSPACE_DIR)
@@ -672,10 +696,24 @@ Task executed successfully.
             "role": "user",
             "content": (
                 f"ENV CACHE LOCKED ONCE: shell_profile={self.state.shell_profile}, root_dir={self.state.root_dir}. "
-                "Do not use ls/dir. For project listing, use run_python_script with "
-                "`import os; print(os.listdir('demo_counter_app'))`."
+                "Prefer workspace-safe commands and keep tool arguments exact."
             ),
         })
+
+        enabled_mcps = mcp_registry.get_enabled_mcp_registry()
+        if enabled_mcps:
+            mcp_lines = "\n".join([f"- {m['name']}: {m['role']}" for m in enabled_mcps])
+            msgs[0]["content"] += (
+                "\n\n[MCP REGISTRY]\n"
+                "Registered MCP servers (use selectively based on task phase):\n"
+                f"{mcp_lines}"
+            )
+            msgs[0]["content"] += (
+                "\n\n[MCP PHASE POLICY - ENFORCED]\n"
+                "1) Implementation phase (default): prioritize `context7` + `github` + `codegeneratormcp`.\n"
+                "2) UI verify phase: use `chrome-devtools`/`web-visual-feedback` only when visual/runtime verification is required.\n"
+                "3) Do NOT call browser MCP tools during pure implementation/debug steps unless task explicitly asks for UI verification.\n"
+            )
 
         # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)
@@ -751,17 +789,16 @@ Task executed successfully.
                         "content": error_summary_prompt
                     })
                     
-                    try:
-                        rescue_text = llm.call_gemini_rescue(
-                            self.trim_history(msgs), 
-                            stuck_reason=stuck_reason
-                        )
-                    except Exception as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
-                            rescue_text = self._simple_fallback_plan()
-                        else:
-                            raise e
+                    rescue_text = rescue_orchestrator.run_rescue(
+                        trim_history_fn=self.trim_history,
+                        msgs=msgs,
+                        stuck_reason=stuck_reason,
+                        simple_fallback_plan_fn=self._simple_fallback_plan,
+                        workspace_dir=Config.WORKSPACE_DIR,
+                        run_id=self.current_task_id or "",
+                        task_id=self.current_task_id or "",
+                        step=step,
+                    )
 
                     self.rescue_cooldown = 3   # After rescue, skip rescue for next 3 steps.
                     
@@ -799,17 +836,16 @@ Task executed successfully.
                     })
                 else:
                     logger.warning("🆘 Too many format failures, forcing rescue...")
-                    try:
-                        rescue_text = llm.call_gemini_rescue(
-                            self.trim_history(msgs), 
-                            stuck_reason="FORMAT ERROR: Agent failed to return valid JSON multiple times."
-                        )
-                    except Exception as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
-                            rescue_text = self._simple_fallback_plan()
-                        else:
-                            raise e
+                    rescue_text = rescue_orchestrator.run_rescue(
+                        trim_history_fn=self.trim_history,
+                        msgs=msgs,
+                        stuck_reason="FORMAT ERROR: Agent failed to return valid JSON multiple times.",
+                        simple_fallback_plan_fn=self._simple_fallback_plan,
+                        workspace_dir=Config.WORKSPACE_DIR,
+                        run_id=self.current_task_id or "",
+                        task_id=self.current_task_id or "",
+                        step=step,
+                    )
 
                     parsed = self.extract_json(rescue_text)
                     self.state.parse_fail_count = 0
@@ -828,6 +864,12 @@ Task executed successfully.
             kwargs = parsed.get("kwargs", {})
             if not isinstance(kwargs, dict):
                 kwargs = {}
+            allowed, policy_msg = self._enforce_mcp_phase_hard_gate(str(action), step)
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": policy_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": policy_msg, "error_type": "policy_error"})
+                continue
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
             if self.state.force_repair_mode and action == "plan":

@@ -188,6 +188,30 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         missing = [a for a in sorted(listed_actions) if a not in core_tools.TOOLS_REGISTRY]
         self.assertEqual(missing, [])
 
+    def test_prompt_parameter_schema_examples_present(self):
+        prompt = Config._BASE_PROMPT
+        self.assertIn('run_cmd → {"cmd": "ls -la"}', prompt)
+        self.assertIn('plan","kwargs":{"steps"', prompt)
+        self.assertIn('get_skill","kwargs":{"skill_name"', prompt)
+
+    def test_rescue_error_code_semantics(self):
+        import core.llm as core_llm
+        self.assertEqual(core_llm._classify_error_code("401 Unauthorized"), "auth_error")
+        self.assertEqual(core_llm._classify_error_code("404 not found"), "not_found")
+        self.assertEqual(core_llm._classify_error_code("429 rate limited"), "rate_limited")
+        self.assertEqual(core_llm._classify_error_code("HTTP 500"), "http_error")
+
+    def test_mcp_registry_alias_and_dedup(self):
+        import core.mcp_registry as mcp_registry
+        with mock.patch.dict(os.environ, {"MCP_SERVERS": "chrome,devtools,codegen,visual,semgrep"}, clear=False):
+            items = mcp_registry.get_enabled_mcp_registry()
+        names = [i["name"] for i in items]
+        self.assertIn("chrome-devtools", names)
+        self.assertIn("codegeneratormcp", names)
+        self.assertIn("web-visual-feedback", names)
+        self.assertIn("semgrep", names)
+        self.assertEqual(names.count("chrome-devtools"), 1)
+
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
 class SmokeIntegrationTests(unittest.TestCase):

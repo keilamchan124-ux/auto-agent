@@ -333,9 +333,18 @@ def run_cmd(cmd: str) -> str:
         else:
             cwd_override = Config.WORKSPACE_DIR
 
-        if binary in {"pytest", "python", "python3"} and "pytest" in cmd:
-            # Permit direct pytest execution for agent feedback loops even when
-            # pytest isn't explicitly listed in ALLOWED_BINARIES.
+        pytest_allowed = False
+        if binary == "pytest":
+            pytest_allowed = True
+        elif binary in {"python", "python3"}:
+            # Only allow explicit pytest module invocation, e.g.:
+            # - python -m pytest
+            # - python3 -m pytest tests/test_x.py
+            normalized_args = [str(x).strip().lower() for x in (args[1:] if not is_windows else shlex.split(cmd, posix=False)[1:])]
+            if len(normalized_args) >= 2 and normalized_args[0] == "-m" and normalized_args[1] == "pytest":
+                pytest_allowed = True
+
+        if pytest_allowed:
             pass
         elif binary not in Config.ALLOWED_BINARIES:
             return format_result(False, "Forbidden command.", error_type="security_error")
@@ -482,6 +491,8 @@ socket.socket.connect = _safe_connect
         )
 
         out = (r.stdout + "\n" + r.stderr).strip() or "Success (No output)"
+        if r.returncode != 0:
+            return format_result(False, _truncate(out, 12000), error_type="execution_error")
         if full_output:
             return format_result(True, _truncate(out, 12000), data={"mode": "full"})
         top20 = "\n".join(out.splitlines()[:20])
