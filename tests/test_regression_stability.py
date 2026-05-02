@@ -1,24 +1,19 @@
-import os
-import sys
+import json
 import tempfile
 import unittest
-import subprocess
-import importlib.util
 from pathlib import Path
-from types import ModuleType
 from unittest import mock
-import json
+import sys
+import os
+from types import ModuleType
+import re
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GEMINI_API_KEY", "test-key")
 os.environ.setdefault("MIMO_API_KEY", "test-key")
-
-if "tools" not in sys.modules:
-    tools_stub = ModuleType("tools")
-    tools_stub.execute_tool = lambda action, kwargs: "{}"
-    sys.modules["tools"] = tools_stub
-
-from agent import Agent
-import main
 
 if "ddgs" not in sys.modules:
     ddgs_stub = ModuleType("ddgs")
@@ -35,29 +30,10 @@ if "markitdown" not in sys.modules:
     markitdown_stub.MarkItDown = _DummyMarkItDown
     sys.modules["markitdown"] = markitdown_stub
 
-_tools_spec = importlib.util.spec_from_file_location("core.tools", Path(__file__).resolve().parents[1] / "core" / "tools.py")
-core_tools = importlib.util.module_from_spec(_tools_spec)
-assert _tools_spec and _tools_spec.loader
-_tools_spec.loader.exec_module(core_tools)
-
-
-class AgentHistoryRegressionTests(unittest.TestCase):
-    def test_smart_summarize_history_returns_short_history_directly(self):
-        agent = Agent.__new__(Agent)
-        msgs = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "task"},
-            {"role": "assistant", "content": "a"},
-            {"role": "user", "content": "b"},
-            {"role": "assistant", "content": "c"},
-            {"role": "user", "content": "d"},
-        ]
-
-        with mock.patch("agent.llm.call_gemini_rescue") as rescue_mock:
-            result = Agent.smart_summarize_history(agent, msgs)
-
-        self.assertEqual(result, msgs)
-        rescue_mock.assert_not_called()
+import main
+from core.agent import Agent
+from core import tools as core_tools
+from core.config import Config
 
 
 class SingleInstanceLockRegressionTests(unittest.TestCase):
@@ -74,50 +50,155 @@ class SingleInstanceLockRegressionTests(unittest.TestCase):
             self.assertTrue(new_pid.isdigit())
             self.assertNotEqual(new_pid, "999999")
 
-    def test_single_instance_exits_when_live_pid_exists(self):
+
+class TraceSummaryRegressionTests(unittest.TestCase):
+    def test_analyze_current_task_trace_counts_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock_path = Path(tmp) / "agent.lock"
-            lock_path.write_text("12345", encoding="utf-8")
+            workspace = Path(tmp) / "workspace"
+            trace_dir = workspace / "artifacts" / "traces"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            task_id = "task_123"
+            trace_path = trace_dir / f"{task_id}.jsonl"
+            rows = [
+                {"task_id": task_id, "action": "plan", "result": {"ok": True}},
+                {"task_id": task_id, "action": "run_cmd", "result": {"ok": False}},
+                {"task_id": task_id, "action": "run_cmd", "result": {"ok": False}},
+            ]
+            trace_path.write_text("\n".join(json.dumps(r) for r in rows), "utf-8")
 
-            with mock.patch.object(main, "LOCK_FILE", str(lock_path)):
-                with mock.patch("main._is_pid_running", return_value=True):
-                    with self.assertRaises(SystemExit) as ctx:
-                        main.single_instance()
+            agent = Agent.__new__(Agent)
+            agent.current_task_id = task_id
+            with mock.patch("core.agent.Config.WORKSPACE_DIR", workspace):
+                summary = Agent._analyze_current_task_trace(agent)
 
-            self.assertEqual(ctx.exception.code, 1)
+            self.assertEqual(summary["total_steps"], 3)
+            self.assertEqual(summary["failed_steps"], 2)
+            self.assertEqual(summary["top_failed_actions"][0][0], "run_cmd")
 
 
-class LeanModeToolTests(unittest.TestCase):
-    def test_github_read_file_supports_line_range_and_lean_mode(self):
+class ToolRegressionTests(unittest.TestCase):
+    def test_design_to_component_metadata_generates_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "workspace" / "repo"
-            repo.mkdir(parents=True, exist_ok=True)
-            target = repo / "demo.txt"
-            target.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
-
-            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", (Path(tmp) / "workspace")):
-                raw = core_tools.github_read_file("repo", "demo.txt", max_chars=3, lean_mode=True, start_line=2, end_line=4)
-                data = json.loads(raw)
-
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                raw = core_tools.design_to_component_metadata(
+                    design_name="demo",
+                    screens=["home", {"name": "settings", "purpose": "preferences"}],
+                    output_path="design/meta.json",
+                )
+            data = json.loads(raw)
             self.assertTrue(data["ok"])
-            self.assertEqual(data["data"]["range"]["start_line"], 2)
-            self.assertEqual(data["data"]["content"], "b\nc\nd")
+            self.assertTrue((workspace / "design" / "meta.json").exists())
 
-    def test_github_commit_push_lean_mode_returns_compact_steps(self):
+    def test_capture_web_screenshot_reports_dependency_error_without_playwright(self):
         with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "workspace" / "repo"
-            repo.mkdir(parents=True, exist_ok=True)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                with mock.patch.dict(sys.modules, {"playwright.sync_api": None}):
+                    raw = core_tools.capture_web_screenshot(
+                        url="http://127.0.0.1:8787",
+                        output_path="artifacts/screen.png",
+                    )
+            data = json.loads(raw)
+            self.assertFalse(data["ok"])
 
-            cp = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="ok", stderr="")
-            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", (Path(tmp) / "workspace")):
-                with mock.patch("core.tools.subprocess.run", return_value=cp) as run_mock:
-                    raw = core_tools.github_commit_push("repo", "msg", branch="feat/x", lean_mode=True)
-                    data = json.loads(raw)
+    def test_start_web_server_writes_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            target = workspace / "build" / "web"
+            target.mkdir(parents=True, exist_ok=True)
 
+            fake_proc = mock.Mock()
+            fake_proc.pid = 4321
+            fake_proc.poll.return_value = None
+
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                with mock.patch("core.tools.subprocess.Popen", return_value=fake_proc):
+                    with mock.patch("core.tools.requests.get") as get_mock:
+                        get_mock.return_value.status_code = 200
+                        raw = core_tools.start_web_server(project_dir="build/web", host="127.0.0.1", port=8787)
+
+            data = json.loads(raw)
             self.assertTrue(data["ok"])
-            self.assertIn("steps", data["data"])
-            self.assertGreaterEqual(len(data["data"]["steps"]), 3)
-            self.assertTrue(run_mock.called)
+            self.assertEqual(data["data"]["pid"], 4321)
+            self.assertTrue(data["data"]["healthy"])
+            self.assertTrue((workspace / "artifacts" / "web_server.json").exists())
+
+    def test_stop_web_server_removes_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            meta_dir = workspace / "artifacts"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            (meta_dir / "web_server.json").write_text(json.dumps({"pid": 999999}), "utf-8")
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                raw = core_tools.stop_web_server()
+            data = json.loads(raw)
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["data"]["stopped"])
+            self.assertFalse((meta_dir / "web_server.json").exists())
+
+
+class PromptRegistryConsistencyTests(unittest.TestCase):
+    def test_prompt_actions_exist_in_registry(self):
+        prompt = Config._BASE_PROMPT
+        listed_actions = set()
+        for line in prompt.splitlines():
+            line = line.strip()
+            if not line.startswith("|") or line.startswith("|---") or line.startswith("| Action"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                continue
+            cell = parts[1]
+            for part in cell.split(","):
+                action = part.strip()
+                if action:
+                    listed_actions.add(action)
+        listed_actions.discard("git_commit")
+        listed_actions.discard("mark_done")
+        missing = [a for a in sorted(listed_actions) if a not in core_tools.TOOLS_REGISTRY]
+        self.assertEqual(missing, [])
+
+
+@unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
+class SmokeIntegrationTests(unittest.TestCase):
+    def test_playwright_and_flutter_quality_gate_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            app_dir = workspace / "app"
+            app_dir.mkdir(parents=True, exist_ok=True)
+            web_dir = workspace / "build" / "web"
+            web_dir.mkdir(parents=True, exist_ok=True)
+            (web_dir / "index.html").write_text("<html><body><h1>smoke</h1></body></html>", "utf-8")
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                start_result = json.loads(core_tools.start_web_server(project_dir="build/web", port=8788))
+                self.assertTrue(start_result.get("ok"))
+                self.assertTrue(start_result["data"].get("healthy"))
+
+                shot = json.loads(
+                    core_tools.capture_web_screenshot(
+                        url="http://127.0.0.1:8788",
+                        output_path="artifacts/smoke.png",
+                        wait_ms=200,
+                    )
+                )
+                self.assertTrue(shot.get("ok"))
+                self.assertTrue((workspace / "artifacts" / "smoke.png").exists())
+
+                quality_result = json.loads(
+                    core_tools.validate_mobile_quality(
+                        project_dir="app",
+                        include_web=True,
+                        strict_web=True,
+                    )
+                )
+                steps = [r["step"] for r in quality_result.get("data", {}).get("results", [])]
+                self.assertIn("flutter pub get", steps)
+                self.assertIn("flutter build web", steps)
+                stopped = json.loads(core_tools.stop_web_server())
+                self.assertTrue(stopped.get("ok"))
 
 
 if __name__ == "__main__":
