@@ -90,6 +90,18 @@ def safe_path(p: str) -> Path:
     return full
 
 
+def _canonicalize_workspace_path(path: str) -> str:
+    """
+    Normalize duplicated workspace prefixes:
+    - workspace/workspace/foo -> workspace/foo
+    - workspace\\workspace\\foo -> workspace/foo
+    """
+    normalized = str(path).replace("\\", "/")
+    while normalized.startswith("workspace/workspace/"):
+        normalized = normalized[len("workspace/"):]
+    return normalized
+
+
 def _truncate(text: str, limit: int) -> str:
     text = text or ""
     return text if len(text) <= limit else text[:limit]
@@ -256,10 +268,19 @@ def run_cmd(cmd: str) -> str:
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
+            if binary == "mkdir" and len(args) >= 3 and args[1] == "-p":
+                target = _canonicalize_workspace_path(" ".join(args[2:]).strip("\"'"))
+                py = f"import os; os.makedirs(r'''{target}''', exist_ok=True); print('ok')"
+                cmd = f'python -c "{py}"'
+                binary = "python"
             if binary == "ls":
-                return _track_policy_error(
-                    "command",
-                    "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
+                binary = "dir"
+                cmd = "dir" if len(args) == 1 else f"dir {' '.join(args[1:])}"
+            elif binary == "cat" and "<<" in cmd:
+                return format_result(
+                    False,
+                    "Heredoc pattern is not supported on Windows run_cmd. Use write_file(path=..., content=...) instead.",
+                    error_type="policy_error",
                 )
             elif binary == "cat":
                 binary = "type"
@@ -276,29 +297,86 @@ def run_cmd(cmd: str) -> str:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
 
-        if binary == "dir":
-            return _track_policy_error(
-                "command",
-                "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
-            )
+        if binary in {"ls", "dir"}:
+            # Allow standard listing commands directly; this reduces unproductive
+            # policy loops and mirrors common shell usage.
+            pass
 
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
-        if is_windows and binary in unix_allow:
+        if is_windows and binary in unix_allow and binary != "ls":
             return _track_policy_error("command", f"Cross-platform command blocked on Windows: {binary}")
-        if (not is_windows) and binary in windows_allow:
+        if (not is_windows) and binary in windows_allow and binary != "dir":
             return _track_policy_error("command", f"Cross-platform command blocked on Unix: {binary}")
 
         if binary == "cd":
-            return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
+            # Support `cd <path>` and `cd <path> && <command...>` while keeping
+            # command allowlist/sandbox checks for the actual executable.
+            if is_windows:
+                split_token = "&&" if "&&" in cmd else None
+                parts = [p.strip() for p in cmd.split(split_token, 1)] if split_token else [cmd]
+                if not parts or len(parts[0].split()) < 2:
+                    return format_result(False, "Invalid cd usage. Example: `cd subdir && python -m pytest`.", error_type="execution_error")
+                cd_target = parts[0][len("cd"):].strip().strip("\"'")
+                next_cmd = parts[1].strip() if split_token and len(parts) > 1 else ""
+            else:
+                if "&&" in cmd:
+                    lhs, rhs = cmd.split("&&", 1)
+                    lhs, next_cmd = lhs.strip(), rhs.strip()
+                else:
+                    lhs, next_cmd = cmd, ""
+                lhs_args = shlex.split(lhs)
+                if len(lhs_args) < 2:
+                    return format_result(False, "Invalid cd usage. Example: `cd subdir && python -m pytest`.", error_type="execution_error")
+                cd_target = lhs_args[1]
 
-        if binary not in Config.ALLOWED_BINARIES:
+            target_dir = (Config.WORKSPACE_DIR / cd_target).resolve()
+            workspace_root = Config.WORKSPACE_DIR.resolve()
+            try:
+                target_dir.relative_to(workspace_root)
+            except ValueError:
+                return format_result(False, "cd target must stay inside workspace.", error_type="security_error")
+            if not target_dir.exists() or not target_dir.is_dir():
+                return format_result(False, f"Directory not found: {cd_target}", error_type="execution_error")
+
+            if not next_cmd:
+                rel = target_dir.relative_to(workspace_root)
+                rel_display = "." if str(rel) == "." else str(rel)
+                return format_result(True, f"Changed directory to {rel_display}")
+
+            if is_windows:
+                next_args = shlex.split(next_cmd, posix=False)
+            else:
+                next_args = shlex.split(next_cmd)
+            if not next_args:
+                return format_result(False, "Missing command after cd.", error_type="execution_error")
+            binary = next_args[0].strip("\"'").lower()
+            cmd = next_cmd
+            args = next_args
+            cwd_override = target_dir
+        else:
+            cwd_override = Config.WORKSPACE_DIR
+
+        pytest_allowed = False
+        if binary == "pytest":
+            pytest_allowed = True
+        elif binary in {"python", "python3"}:
+            # Only allow explicit pytest module invocation, e.g.:
+            # - python -m pytest
+            # - python3 -m pytest tests/test_x.py
+            normalized_args = [str(x).strip().lower() for x in (args[1:] if not is_windows else shlex.split(cmd, posix=False)[1:])]
+            if len(normalized_args) >= 2 and normalized_args[0] == "-m" and normalized_args[1] == "pytest":
+                pytest_allowed = True
+
+        if pytest_allowed:
+            pass
+        elif binary not in Config.ALLOWED_BINARIES:
             return format_result(False, "Forbidden command.", error_type="security_error")
 
         if is_windows:
             r = subprocess.run(
                 cmd,
                 shell=True,
-                cwd=Config.WORKSPACE_DIR,
+                cwd=cwd_override,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -306,7 +384,7 @@ def run_cmd(cmd: str) -> str:
         else:
             r = subprocess.run(
                 args,
-                cwd=Config.WORKSPACE_DIR,
+                cwd=cwd_override,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -348,6 +426,7 @@ def run_cmd(cmd: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     try:
+        path = _canonicalize_workspace_path(path)
         normalized = str(path).replace("\\", "/")
         cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
         if cwd.endswith("/workspace") and normalized.startswith("workspace/demo_counter_app"):
@@ -364,6 +443,7 @@ def read_file(path: str, full_output: bool = True) -> str:
     try:
         if not path:
             return format_result(False, "Empty path.", error_type="io_error")
+        path = _canonicalize_workspace_path(path)
         normalized = str(path).replace("\\", "/")
         cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
         if cwd.endswith("/workspace") and normalized.startswith("workspace/"):
@@ -436,6 +516,13 @@ socket.socket.connect = _safe_connect
         )
 
         out = (r.stdout + "\n" + r.stderr).strip() or "Success (No output)"
+        if r.returncode != 0:
+            stderr_lines = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+            last_stderr = stderr_lines[-1] if stderr_lines else ""
+            detail = f"returncode={r.returncode}"
+            if last_stderr:
+                detail += f"; last_stderr={last_stderr}"
+            return format_result(False, _truncate(f"{detail}\n{out}", 12000), error_type="execution_error")
         if full_output:
             return format_result(True, _truncate(out, 12000), data={"mode": "full"})
         top20 = "\n".join(out.splitlines()[:20])

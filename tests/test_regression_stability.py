@@ -188,6 +188,49 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         missing = [a for a in sorted(listed_actions) if a not in core_tools.TOOLS_REGISTRY]
         self.assertEqual(missing, [])
 
+    def test_prompt_parameter_schema_examples_present(self):
+        prompt = Config._BASE_PROMPT
+        self.assertIn('run_cmd → {"cmd": "ls -la"}', prompt)
+        self.assertIn('plan","kwargs":{"steps"', prompt)
+        self.assertIn('get_skill","kwargs":{"skill_name"', prompt)
+
+    def test_rescue_error_code_semantics(self):
+        import core.llm as core_llm
+        self.assertEqual(core_llm._classify_error_code("401 Unauthorized"), "auth_error")
+        self.assertEqual(core_llm._classify_error_code("404 not found"), "not_found")
+        self.assertEqual(core_llm._classify_error_code("429 rate limited"), "rate_limited")
+        self.assertEqual(core_llm._classify_error_code("HTTP 500"), "http_error")
+
+    def test_mcp_registry_alias_and_dedup(self):
+        import core.mcp_registry as mcp_registry
+        with mock.patch.dict(os.environ, {"MCP_SERVERS": "chrome,devtools,codegen,visual,semgrep"}, clear=False):
+            items = mcp_registry.get_enabled_mcp_registry()
+        names = [i["name"] for i in items]
+        self.assertIn("chrome-devtools", names)
+        self.assertIn("codegeneratormcp", names)
+        self.assertIn("web-visual-feedback", names)
+        self.assertIn("semgrep", names)
+        self.assertEqual(names.count("chrome-devtools"), 1)
+
+    def test_workspace_path_canonicalizer(self):
+        self.assertEqual(core_tools._canonicalize_workspace_path("workspace/workspace/demo/x.py"), "workspace/demo/x.py")
+        self.assertEqual(core_tools._canonicalize_workspace_path("workspace\\workspace\\demo\\x.py"), "workspace/demo/x.py")
+
+    def test_rescue_decision_matrix_returns_predictable_actions(self):
+        import core.llm as core_llm
+        self.assertEqual(core_llm.get_rescue_decision("auth_error")["action"], "run_cmd")
+        self.assertEqual(core_llm.get_rescue_decision("not_found")["action"], "read_file")
+        self.assertEqual(core_llm.get_rescue_decision("rate_limited")["action"], "plan")
+
+    def test_policy_gate_phase_and_completion_lock(self):
+        from core.policy_gate import PolicyGate
+        gate = PolicyGate(phase_window=3)
+        self.assertTrue(gate.is_ui_verify_phase(3))
+        self.assertFalse(gate.is_ui_verify_phase(2))
+        self.assertTrue(gate.enforce_mcp_phase_hard_gate("capture_web_screenshot", True))
+        self.assertFalse(gate.enforce_mcp_phase_hard_gate("download_file", True))
+        self.assertFalse(gate.enforce_completion_lock("mark_done", True))
+
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
 class SmokeIntegrationTests(unittest.TestCase):
