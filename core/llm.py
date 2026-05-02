@@ -118,7 +118,7 @@ def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     for attempt in range(retries + 1):
         try:
             response = GEMINI_CLIENT.models.generate_content(
-                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "GEMINI_MODEL", "gemini-2.5-flash")),
+                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "GEMINI_MODEL", "gemini-3.1-flash-lite-preview")),
                 contents=contents
             )
             return getattr(response, "text", "") or ""
