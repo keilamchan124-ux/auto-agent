@@ -24,7 +24,7 @@ class Config:
     SKILLS_DIR = Path(__file__).resolve().parent.parent / ".agents" / "skills"
 
     # ===== AGENT CONTROL =====
-    MAX_STEPS = int(os.getenv("MAX_STEPS", 40))   # increased from 25 to 40
+    MAX_STEPS = int(os.getenv("MAX_STEPS", 50))
     MAX_HISTORY = int(os.getenv("MAX_HISTORY", 20))
     MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", 60000))  # higher context budget for multiple skills
     POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 2))
@@ -136,7 +136,10 @@ class Config:
 
     # ===== SECURITY =====
     ALLOWED_BINARIES = set(
-        os.getenv("ALLOWED_BINARIES", "python,python3,pip,pip3,ls,cat,echo,git,ls,dir,find,cat,echo,pwd,cd").split(",")
+        os.getenv(
+            "ALLOWED_BINARIES",
+            "python,python3,pip,pip3,ls,cat,echo,git,dir,find,pwd,cd,flutter,dart,npm,npx,node,pnpm,yarn,gradle,gradlew,java,javac,adb,sdkmanager,avdmanager,emulator,bundletool",
+        ).split(",")
     )
     ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "*").split(",") if d.strip()]
 
@@ -164,7 +167,13 @@ class Config:
         "| download_file, run_cmd | Shell execution (guarded) & IO |\n"
         "| write_file, read_file | Local file management |\n"
         "| run_python_script | Execute python code natively |\n"
-        "| git_commit, mark_done | Version control & finish task |\n\n"
+        "| design_to_component_metadata | Convert design references into metadata + checklist scaffold |\n"
+        "| validate_mobile_quality | Run flutter build/test/lint quality gate |\n"
+        "| render_progress_dashboard | Render runtime progress + task summary dashboard |\n"
+        "| capture_web_screenshot | Capture web screenshots via Playwright for visual validation |\n"
+        "| start_web_server | Start local static web server for screenshot/testing loop |\n"
+        "| git_commit | Version control |\n"
+        "| mark_done | Control action (handled by agent loop, not tool registry) |\n\n"
         
         "=== RULES ===\n"
         "1. NEVER repeat the same action >2 times.\n"
