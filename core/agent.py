@@ -496,6 +496,10 @@ Task executed successfully.
             if "command" in kwargs:
                 kwargs["cmd"] = str(kwargs.pop("command"))
                 fixed = True
+        elif action == "run_python_script" and "code" not in kwargs:
+            if "script" in kwargs:
+                kwargs["code"] = str(kwargs.pop("script"))
+                fixed = True
                 
         if fixed:
             logger.info("🔧 Auto-fixed %s parameters (one-shot repair): %s -> %s", action, original_kwargs, kwargs)

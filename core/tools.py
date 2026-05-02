@@ -257,10 +257,8 @@ def run_cmd(cmd: str) -> str:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
             if binary == "ls":
-                return _track_policy_error(
-                    "command",
-                    "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
-                )
+                binary = "dir"
+                cmd = "dir" if len(args) == 1 else f"dir {' '.join(args[1:])}"
             elif binary == "cat":
                 binary = "type"
                 cmd = "type" if len(args) == 1 else f"type {' '.join(args[1:])}"
@@ -276,29 +274,77 @@ def run_cmd(cmd: str) -> str:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
 
-        if binary == "dir":
-            return _track_policy_error(
-                "command",
-                "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
-            )
+        if binary in {"ls", "dir"}:
+            # Allow standard listing commands directly; this reduces unproductive
+            # policy loops and mirrors common shell usage.
+            pass
 
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
-        if is_windows and binary in unix_allow:
+        if is_windows and binary in unix_allow and binary != "ls":
             return _track_policy_error("command", f"Cross-platform command blocked on Windows: {binary}")
-        if (not is_windows) and binary in windows_allow:
+        if (not is_windows) and binary in windows_allow and binary != "dir":
             return _track_policy_error("command", f"Cross-platform command blocked on Unix: {binary}")
 
         if binary == "cd":
-            return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
+            # Support `cd <path>` and `cd <path> && <command...>` while keeping
+            # command allowlist/sandbox checks for the actual executable.
+            if is_windows:
+                split_token = "&&" if "&&" in cmd else None
+                parts = [p.strip() for p in cmd.split(split_token, 1)] if split_token else [cmd]
+                if not parts or len(parts[0].split()) < 2:
+                    return format_result(False, "Invalid cd usage. Example: `cd subdir && python -m pytest`.", error_type="execution_error")
+                cd_target = parts[0][len("cd"):].strip().strip("\"'")
+                next_cmd = parts[1].strip() if split_token and len(parts) > 1 else ""
+            else:
+                if "&&" in cmd:
+                    lhs, rhs = cmd.split("&&", 1)
+                    lhs, next_cmd = lhs.strip(), rhs.strip()
+                else:
+                    lhs, next_cmd = cmd, ""
+                lhs_args = shlex.split(lhs)
+                if len(lhs_args) < 2:
+                    return format_result(False, "Invalid cd usage. Example: `cd subdir && python -m pytest`.", error_type="execution_error")
+                cd_target = lhs_args[1]
 
-        if binary not in Config.ALLOWED_BINARIES:
+            target_dir = (Config.WORKSPACE_DIR / cd_target).resolve()
+            workspace_root = Config.WORKSPACE_DIR.resolve()
+            try:
+                target_dir.relative_to(workspace_root)
+            except ValueError:
+                return format_result(False, "cd target must stay inside workspace.", error_type="security_error")
+            if not target_dir.exists() or not target_dir.is_dir():
+                return format_result(False, f"Directory not found: {cd_target}", error_type="execution_error")
+
+            if not next_cmd:
+                rel = target_dir.relative_to(workspace_root)
+                rel_display = "." if str(rel) == "." else str(rel)
+                return format_result(True, f"Changed directory to {rel_display}")
+
+            if is_windows:
+                next_args = shlex.split(next_cmd, posix=False)
+            else:
+                next_args = shlex.split(next_cmd)
+            if not next_args:
+                return format_result(False, "Missing command after cd.", error_type="execution_error")
+            binary = next_args[0].strip("\"'").lower()
+            cmd = next_cmd
+            args = next_args
+            cwd_override = target_dir
+        else:
+            cwd_override = Config.WORKSPACE_DIR
+
+        if binary in {"pytest", "python", "python3"} and "pytest" in cmd:
+            # Permit direct pytest execution for agent feedback loops even when
+            # pytest isn't explicitly listed in ALLOWED_BINARIES.
+            pass
+        elif binary not in Config.ALLOWED_BINARIES:
             return format_result(False, "Forbidden command.", error_type="security_error")
 
         if is_windows:
             r = subprocess.run(
                 cmd,
                 shell=True,
-                cwd=Config.WORKSPACE_DIR,
+                cwd=cwd_override,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -306,7 +352,7 @@ def run_cmd(cmd: str) -> str:
         else:
             r = subprocess.run(
                 args,
-                cwd=Config.WORKSPACE_DIR,
+                cwd=cwd_override,
                 capture_output=True,
                 text=True,
                 timeout=30
