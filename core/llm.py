@@ -14,10 +14,10 @@ logger = logging.getLogger("LLM")
 GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
 NIM_GATEWAY_CLIENT = OpenAI(
-    api_key=Config.NIM_GATEWAY_API_KEY,
-    base_url=Config.NIM_GATEWAY_BASE_URL,
+    api_key=Config.NIM_API_KEY,
+    base_url=Config.NIM_BASE_URL,
     timeout=120,
-) if Config.NIM_GATEWAY_API_KEY and Config.NIM_GATEWAY_BASE_URL else None
+) if Config.NIM_API_KEY and Config.NIM_BASE_URL else None
 
 MIMO_CLIENT = OpenAI(
     api_key=Config.MIMO_API_KEY,
