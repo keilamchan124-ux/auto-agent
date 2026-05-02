@@ -32,7 +32,9 @@ class AgentState:
     plan_executed_count: int = 0
     quality_gate_passed: bool = False
     quality_gate_web_warning: bool = False
+    quality_gate_web_warning_count: int = 0
     quality_gate_strict_web: bool = True
+    task_mode: str = "general"
 
 class Agent:
     def __init__(self):
@@ -143,8 +145,10 @@ Task executed successfully.
                 "search_count": self.state.search_count,
                 "error_count": self.state.error_count,
                 "plan_executed_count": self.state.plan_executed_count,
+                "task_mode": self.state.task_mode,
                 "last_action": self.state.last_action,
                 "last_error": self.state.last_error,
+                "quality_gate_web_warning_count": self.state.quality_gate_web_warning_count,
             },
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -609,6 +613,8 @@ Task executed successfully.
         self.reset_counters()
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
+        task_lower = task.lower()
+        self.state.task_mode = "mobile" if ("[mode] stitch_flutter" in task_lower or "flutter" in task_lower) else "general"
 
         msgs: List[Dict[str, str]] = [
             {
@@ -801,7 +807,7 @@ Task executed successfully.
 
             # finish
             if action == "mark_done":
-                if not self.state.quality_gate_passed:
+                if self.state.task_mode == "mobile" and not self.state.quality_gate_passed:
                     msgs.append({
                         "role": "user",
                         "content": (
@@ -810,7 +816,7 @@ Task executed successfully.
                         )
                     })
                     continue
-                if self.state.quality_gate_web_warning:
+                if self.state.task_mode == "mobile" and self.state.quality_gate_web_warning:
                     msgs.append({
                         "role": "user",
                         "content": (
@@ -860,6 +866,7 @@ Task executed successfully.
                     self.state.quality_gate_strict_web = bool(validation_data.get("strict_web", True))
                     warning_rows = [r for r in validation_data.get("results", []) if r.get("step") == "web-validation-warning"]
                     self.state.quality_gate_web_warning = len(warning_rows) > 0
+                    self.state.quality_gate_web_warning_count = len(warning_rows)
 
             except Exception as e:
                 res_data = {

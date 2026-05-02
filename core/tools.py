@@ -754,6 +754,8 @@ def validate_mobile_quality(
             all_passed = all_passed and ok
             results.append({"step": name, "ok": ok, "output": _truncate(out, 1200)})
 
+        core_passed = all_passed
+        web_warning = False
         if include_web and not strict_web:
             web_step_names = {name for name, _ in web_steps}
             core_results = [r for r in results if r["step"] not in web_step_names]
@@ -762,6 +764,7 @@ def validate_mobile_quality(
             web_passed = all(r["ok"] for r in web_results) if web_results else True
             all_passed = core_passed
             if not web_passed:
+                web_warning = True
                 results.append(
                     {
                         "step": "web-validation-warning",
@@ -772,10 +775,16 @@ def validate_mobile_quality(
 
         return format_result(
             all_passed,
-            "Mobile quality gate passed." if all_passed else "Mobile quality gate failed.",
+            (
+                f"Mobile quality gate passed. core_passed={core_passed}, web_warning={web_warning}."
+                if all_passed
+                else f"Mobile quality gate failed. core_passed={core_passed}, web_warning={web_warning}."
+            ),
             data={
                 "framework": framework,
                 "all_passed": all_passed,
+                "core_passed": core_passed,
+                "web_warning": web_warning,
                 "include_web": include_web,
                 "strict_web": strict_web,
                 "results": results,
@@ -900,16 +909,25 @@ def start_web_server(
             stderr=stderr_f,
             text=True,
         )
-        time.sleep(0.4)
+        stdout_f.close()
+        stderr_f.close()
+        time.sleep(0.3)
         if proc.poll() is not None:
             return format_result(False, "Web server process exited during startup.", error_type="execution_error")
 
         health_url = f"http://{host}:{int(port)}"
-        try:
-            r = requests.get(health_url, timeout=3)
-            healthy = r.status_code < 500
-        except Exception:
-            healthy = False
+        healthy = False
+        health_error = ""
+        for _ in range(5):
+            try:
+                r = requests.get(health_url, timeout=3)
+                healthy = r.status_code < 500
+                if healthy:
+                    break
+                health_error = f"HTTP status {r.status_code}"
+            except Exception as e:
+                health_error = str(e)
+            time.sleep(0.3)
 
         server_meta = {
             "pid": proc.pid,
@@ -927,7 +945,7 @@ def start_web_server(
         meta_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if not healthy:
-            return format_result(False, "Web server started but health check failed.", data=server_meta, error_type="health_check_failed")
+            return format_result(False, f"Web server started but health check failed: {health_error}", data=server_meta, error_type="health_check_failed")
         return format_result(True, "Web server started and healthy.", data=server_meta)
     except Exception as e:
         return format_result(False, str(e), error_type="execution_error")
@@ -945,16 +963,31 @@ def stop_web_server(meta_path: str = "artifacts/web_server.json") -> str:
         if pid <= 0:
             return format_result(False, "Invalid PID in metadata file.", error_type="validation_error")
 
+        stopped = False
+        reason = ""
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=15)
+                r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=15)
+                stopped = r.returncode == 0
+                reason = (r.stdout + r.stderr).strip()
             else:
                 os.kill(pid, 15)
+                for _ in range(5):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.2)
+                    except ProcessLookupError:
+                        stopped = True
+                        break
+                if not stopped:
+                    os.kill(pid, 9)
+                    stopped = True
         except ProcessLookupError:
-            pass
+            stopped = True
+            reason = "Process not found; treated as already stopped."
 
         p.unlink(missing_ok=True)
-        return format_result(True, "Web server stopped and metadata removed.", data={"pid": pid, "meta_path": meta_path})
+        return format_result(True, "Web server stop flow completed.", data={"pid": pid, "meta_path": meta_path, "stopped": stopped, "reason": reason})
     except Exception as e:
         return format_result(False, str(e), error_type="execution_error")
 

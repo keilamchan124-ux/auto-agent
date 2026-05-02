@@ -123,6 +123,7 @@ class ToolRegressionTests(unittest.TestCase):
             data = json.loads(raw)
             self.assertTrue(data["ok"])
             self.assertEqual(data["data"]["pid"], 4321)
+            self.assertTrue(data["data"]["healthy"])
             self.assertTrue((workspace / "artifacts" / "web_server.json").exists())
 
     def test_stop_web_server_removes_metadata(self):
@@ -135,6 +136,7 @@ class ToolRegressionTests(unittest.TestCase):
                 raw = core_tools.stop_web_server()
             data = json.loads(raw)
             self.assertTrue(data["ok"])
+            self.assertTrue(data["data"]["stopped"])
             self.assertFalse((meta_dir / "web_server.json").exists())
 
 
@@ -167,15 +169,36 @@ class SmokeIntegrationTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             app_dir = workspace / "app"
             app_dir.mkdir(parents=True, exist_ok=True)
+            web_dir = workspace / "build" / "web"
+            web_dir.mkdir(parents=True, exist_ok=True)
+            (web_dir / "index.html").write_text("<html><body><h1>smoke</h1></body></html>", "utf-8")
             with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
-                result = json.loads(
+                start_result = json.loads(core_tools.start_web_server(project_dir="build/web", port=8788))
+                self.assertTrue(start_result.get("ok"))
+                self.assertTrue(start_result["data"].get("healthy"))
+
+                shot = json.loads(
+                    core_tools.capture_web_screenshot(
+                        url="http://127.0.0.1:8788",
+                        output_path="artifacts/smoke.png",
+                        wait_ms=200,
+                    )
+                )
+                self.assertTrue(shot.get("ok"))
+                self.assertTrue((workspace / "artifacts" / "smoke.png").exists())
+
+                quality_result = json.loads(
                     core_tools.validate_mobile_quality(
                         project_dir="app",
                         include_web=True,
-                        strict_web=False,
+                        strict_web=True,
                     )
                 )
-            self.assertIn("ok", result)
+                steps = [r["step"] for r in quality_result.get("data", {}).get("results", [])]
+                self.assertIn("flutter pub get", steps)
+                self.assertIn("flutter build web", steps)
+                stopped = json.loads(core_tools.stop_web_server())
+                self.assertTrue(stopped.get("ok"))
 
 
 if __name__ == "__main__":

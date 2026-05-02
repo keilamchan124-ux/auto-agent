@@ -172,7 +172,8 @@ class Config:
         "| render_progress_dashboard | Render runtime progress + task summary dashboard |\n"
         "| capture_web_screenshot | Capture web screenshots via Playwright for visual validation |\n"
         "| start_web_server | Start local static web server for screenshot/testing loop |\n"
-        "| git_commit, mark_done | Version control & finish task |\n\n"
+        "| git_commit | Version control |\n"
+        "| mark_done | Control action (handled by agent loop, not tool registry) |\n\n"
         
         "=== RULES ===\n"
         "1. NEVER repeat the same action >2 times.\n"
