@@ -8,6 +8,8 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict, field
 import json_repair
+import os
+import platform
 
 
 from core.config import Config
@@ -30,6 +32,13 @@ class AgentState:
     loaded_skills: List[str] = field(default_factory=list)
     last_error: Optional[str] = None
     plan_executed_count: int = 0
+    quality_gate_passed: bool = False
+    quality_gate_web_warning: bool = False
+    quality_gate_web_warning_count: int = 0
+    quality_gate_strict_web: bool = True
+    task_mode: str = "general"
+    shell_profile: str = "unknown"
+    root_dir: str = ""
 
 class Agent:
     def __init__(self):
@@ -50,25 +59,25 @@ class Agent:
         self.state = AgentState()
 
     def _try_local_repair(self) -> bool:
-        """嘗試本地修復，不呼叫 Gemini"""
+        """Attempt local repair without calling Gemini."""
         last_action = self.state.last_action
         
-        # 針對常見錯誤的本地修復
+        # Local fixes for common parameter mistakes
         if last_action == "plan":
             if "missing" in str(self.state.last_error).lower():
-                logger.info("🔧 偵測到 plan 參數錯誤，嘗試本地修正")
+                logger.info("🔧 Detected plan parameter error, trying local fix.")
                 return True
         
         if last_action == "get_skill":
             if "missing" in str(self.state.last_error).lower():
-                logger.info("🔧 偵測到 get_skill 參數錯誤，嘗試本地修正")
+                logger.info("🔧 Detected get_skill parameter error, trying local fix.")
                 return True
         
         return False
 
     def _simple_fallback_plan(self) -> str:
-        """當 Gemini 無法使用時的簡單 fallback"""
-        return """```json\n{"action":"plan","kwargs":{"steps":"1. 分析剛剛的錯誤\\n2. 使用正確的參數格式重試\\n3. 如果還是失敗，嘗試其他方法或跳過此步驟"}}\n```"""
+        """Simple fallback plan when Gemini is unavailable."""
+        return """```json\n{"action":"plan","kwargs":{"steps":"1. Analyze the previous error\\n2. Retry with correct parameters\\n3. If still failing, switch strategy or skip this step"}}\n```"""
 
     def save_state(self):
         self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
@@ -78,7 +87,7 @@ class Agent:
         self.save_state()
 
     def _clean_workspace(self):
-        """清理 workspace，只保留重要檔案"""
+        """Clean workspace while preserving important files."""
         important_files = {"state.json", "execution_trace.jsonl", "todo.txt"}
         
         for item in Config.WORKSPACE_DIR.iterdir():
@@ -88,7 +97,7 @@ class Agent:
                 except Exception as e:
                     logger.warning(f"Failed to delete {item.name}: {e}")
             elif item.is_dir():
-                # 刪除臨時資料夾，保留 artifacts 及隱藏目錄
+                # Remove temporary folders, keep artifacts and hidden control folders.
                 if item.name not in {"artifacts", ".agents", ".antigravity"}:
                     try:
                         shutil.rmtree(item)
@@ -112,20 +121,162 @@ Task executed successfully.
 """
         report_path.write_text(content, encoding="utf-8")
 
+    def _update_runtime_progress(
+        self,
+        task: str,
+        step: int,
+        max_steps: int,
+        phase: str,
+        current_action: Optional[str] = None,
+        last_result_ok: Optional[bool] = None,
+        status: str = "running",
+    ) -> None:
+        progress_path = Config.WORKSPACE_DIR / "artifacts" / "runtime_progress.json"
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress = {
+            "task_id": self.current_task_id,
+            "task_preview": task[:200],
+            "status": status,
+            "phase": phase,
+            "step": step,
+            "max_steps": max_steps,
+            "progress_pct": round((step / max_steps) * 100, 2) if max_steps > 0 else 0,
+            "current_action": current_action,
+            "last_result_ok": last_result_ok,
+            "state": {
+                "repeat_count": self.state.repeat_count,
+                "parse_fail_count": self.state.parse_fail_count,
+                "search_count": self.state.search_count,
+                "error_count": self.state.error_count,
+                "plan_executed_count": self.state.plan_executed_count,
+                "task_mode": self.state.task_mode,
+                "last_action": self.state.last_action,
+                "last_error": self.state.last_error,
+                "quality_gate_web_warning_count": self.state.quality_gate_web_warning_count,
+            },
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), "utf-8")
+
     def append_trace(self, action: str, kwargs: dict, result: dict):
         trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
-        
+        task_trace_dir = Config.WORKSPACE_DIR / "artifacts" / "traces"
+        task_trace_dir.mkdir(parents=True, exist_ok=True)
+
+        compact_kwargs = kwargs if isinstance(kwargs, dict) else {}
+        compact_result = result if isinstance(result, dict) else {}
         trace_entry = {
             "task_id": self.current_task_id or "unknown",
             "step": self.current_step,
-            "time": time.time(), 
-            "action": action, 
-            "kwargs": kwargs, 
-            "result": result
+            "time": time.time(),
+            "action": action,
+            "kwargs": compact_kwargs,
+            "result": {
+                "ok": bool(compact_result.get("ok", False)),
+                "message": str(compact_result.get("message", ""))[:400],
+                "error_type": compact_result.get("error_type"),
+            }
         }
-        
+
         with open(trace_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
+        task_trace_path = task_trace_dir / f"{self.current_task_id}.jsonl"
+        with open(task_trace_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
+        self._rotate_global_trace_if_needed(trace_path)
+        self._write_task_summary_index(trace_entry)
+
+    def _rotate_global_trace_if_needed(self, trace_path, max_bytes: int = 5_000_000) -> None:
+        try:
+            if not trace_path.exists():
+                return
+            if trace_path.stat().st_size <= max_bytes:
+                return
+            archive_dir = Config.WORKSPACE_DIR / "artifacts" / "trace_archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archive_name = f"execution_trace_{int(time.time())}.jsonl"
+            archived_path = archive_dir / archive_name
+            trace_path.replace(archived_path)
+            trace_path.write_text("", "utf-8")
+            logger.info("📦 Rotated execution_trace.jsonl -> %s", archived_path)
+        except Exception as e:
+            logger.warning("Trace rotation failed: %s", e)
+
+    def _write_task_summary_index(self, trace_entry: Dict[str, Any]) -> None:
+        task_id = str(trace_entry.get("task_id") or "unknown")
+        summary_dir = Config.WORKSPACE_DIR / "artifacts" / "task_summaries"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / f"{task_id}.summary.json"
+
+        current = {
+            "task_id": task_id,
+            "total_steps": 0,
+            "failed_steps": 0,
+            "last_step": 0,
+            "last_action": None,
+            "last_updated": None,
+            "top_failed_actions": {},
+        }
+        if summary_path.exists():
+            try:
+                current = json.loads(summary_path.read_text("utf-8"))
+            except Exception:
+                pass
+
+        current["total_steps"] = int(current.get("total_steps", 0)) + 1
+        current["last_step"] = int(trace_entry.get("step", 0))
+        current["last_action"] = trace_entry.get("action")
+        current["last_updated"] = trace_entry.get("time")
+
+        result = trace_entry.get("result") or {}
+        if not bool(result.get("ok", False)):
+            current["failed_steps"] = int(current.get("failed_steps", 0)) + 1
+            failed_map = current.get("top_failed_actions", {}) or {}
+            action = str(trace_entry.get("action", "unknown"))
+            failed_map[action] = int(failed_map.get(action, 0)) + 1
+            current["top_failed_actions"] = failed_map
+
+        summary_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), "utf-8")
+
+    def _analyze_current_task_trace(self) -> Dict[str, Any]:
+        task_trace_path = Config.WORKSPACE_DIR / "artifacts" / "traces" / f"{self.current_task_id}.jsonl"
+        trace_path = task_trace_path if task_trace_path.exists() else (Config.WORKSPACE_DIR / "execution_trace.jsonl")
+        if not trace_path.exists():
+            return {"total_steps": 0, "failed_steps": 0, "last_action": None, "top_failed_actions": []}
+
+        total_steps = 0
+        failed_steps = 0
+        last_action: Optional[str] = None
+        failed_action_counts: Dict[str, int] = {}
+
+        with open(trace_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+
+                if row.get("task_id") != self.current_task_id:
+                    continue
+
+                total_steps += 1
+                last_action = row.get("action")
+                ok = bool((row.get("result") or {}).get("ok", False))
+                if not ok:
+                    failed_steps += 1
+                    action = str(row.get("action", "unknown"))
+                    failed_action_counts[action] = failed_action_counts.get(action, 0) + 1
+
+        top_failed_actions = sorted(failed_action_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        return {
+            "total_steps": total_steps,
+            "failed_steps": failed_steps,
+            "last_action": last_action,
+            "top_failed_actions": top_failed_actions,
+        }
             
     # ---------- Context / History ----------
 
@@ -213,18 +364,55 @@ Task executed successfully.
         """
         compact = {
             "ok": bool(result.get("ok", False)),
-            "msg": str(result.get("message", ""))  # Do not hard-truncate to 120 chars
+            "status": "ok" if bool(result.get("ok", False)) else "error",
+            "msg": str(result.get("message", ""))
         }
-        if "data" in result:
-            compact["data"] = result["data"]
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        top_issues: List[str] = []
+        next_actions: List[str] = []
+
+        if isinstance(data.get("results"), list):
+            failed = [r for r in data["results"] if isinstance(r, dict) and not r.get("ok", True)]
+            top_issues.extend([str(r.get("step", "unknown")) for r in failed[:3]])
+            next_actions.extend([f"Fix failing step: {str(r.get('step', 'unknown'))}" for r in failed[:2]])
 
         if not compact["ok"]:
             compact["err"] = str(result.get("error_type", "error"))
+            if not top_issues:
+                top_issues.append(compact["err"])
+            if not next_actions:
+                next_actions.append("Apply a targeted fix and rerun the failing tool.")
+
+        compact["top_issues"] = top_issues[:3]
+        compact["next_actions"] = next_actions[:3]
 
         msgs.append({
             "role": "user",
             "content": json.dumps({"result": compact}, ensure_ascii=False)
         })
+
+    def _build_tool_first_repair_prompt(self, action: str, result: Dict[str, Any]) -> str:
+        error_type = str(result.get("error_type", "runtime_error"))
+        message = str(result.get("message", "")).strip()
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        failed_steps: List[str] = []
+        if isinstance(data.get("results"), list):
+            failed_steps = [
+                str(r.get("step", "unknown"))
+                for r in data.get("results", [])
+                if isinstance(r, dict) and not r.get("ok", True)
+            ][:3]
+        return (
+            "TOOL-FIRST REPAIR BRANCHING:\n"
+            f"- failed_action: {action}\n"
+            f"- error_type: {error_type}\n"
+            f"- failed_steps: {failed_steps}\n"
+            f"- top_error: {message[:240]}\n"
+            "- choose one and execute next:\n"
+            "A) patch code/config and rerun the same tool\n"
+            "B) resolve one missing dependency/input and rerun the same tool\n"
+            "C) if blocked, do minimal fallback and continue highest-impact step"
+        )
 
     # ---------- Guards ----------
     def update_repeat_guard(self, action: str) -> None:
@@ -237,11 +425,11 @@ Task executed successfully.
     def should_force_rescue(self) -> bool:
         """
         Error-type specific recovery policies:
-        - 嚴重錯誤/工具參數 (error_count 被手動設為 >= 3): immediate
-        - 執行錯誤 (error_count >= 3): allow 2~3 retries, then rescue
-        - 格式錯誤 (parse_fail_count >= 2): handled inside loop
-        - 重複動作 (repeat_count >= 2)
-        - 搜尋迴圈 (search_count >= 4)
+        - severe/tool-parameter errors: immediate rescue
+        - runtime errors: allow limited retries, then rescue
+        - format errors: handled after repeated parse failures
+        - repeated-action loops
+        - search loops
         """
         if self.state.error_count >= 3:
             return True
@@ -254,7 +442,7 @@ Task executed successfully.
         return False
 
     def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
-        """Early Stop 機制已取消，永遠不提早結束 (Success Heuristics disabled)"""
+        """Early-stop heuristics disabled; never stop early."""
         return False
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
@@ -315,15 +503,12 @@ Task executed successfully.
         return kwargs
 
     def _summarize_skill(self, skill_name: str, full_content: str) -> str:
-        """
-        方案 A：精簡注入 (Skill Lean Injection)
-        把原本動輒數千字的技能說明，濃縮到指定字數內，保留最重要規則。
-        """
+        """Summarize long skill content into a compact injection format."""
         max_chars = getattr(Config, "SKILL_SUMMARY_MAX_CHARS", 600)
         if len(full_content) <= max_chars:
             return full_content
             
-        # 嘗試保留大綱和重點
+        # Preserve key headings and important bullet points.
         lines = full_content.split('\n')
         summary = []
         current_length = 0
@@ -332,29 +517,26 @@ Task executed successfully.
             stripped = line.strip()
             if not stripped: continue
             
-            # 優先保留標題 (##) 和重點列表 (-)
+            # Prefer headings and bullet-point rules.
             if stripped.startswith("#") or stripped.startswith("-") or stripped.startswith("*"):
                 summary.append(line)
                 current_length += len(line)
-            elif current_length < max_chars // 2: # 保留開頭的簡介段落
+            elif current_length < max_chars // 2: # Preserve introductory context.
                 summary.append(line)
                 current_length += len(line)
                 
             if current_length >= max_chars:
-                summary.append("...(已截斷，詳情已省略以節省 Context，請遵循上述核心原則)")
+                summary.append("...(truncated to save context; follow the core rules above)")
                 break
                 
         if not summary:
-            return full_content[:max_chars] + "...\n(已截斷)"
+            return full_content[:max_chars] + "...\n(truncated)"
             
         return "\n".join(summary)
 
     # ---------- Auto Skill Router (Layer 3) ----------
     def _auto_select_skills(self, task: str, max_skills: int = 4) -> List[str]:
-        """
-        規則式技能路由：根據任務文本的關鍵字匹配，自動選擇最相關的 2~4 個技能。
-        用簡單的 keyword scoring —— 零成本、零延遲、不需要額外 API call。
-        """
+        """Rule-based skill routing using keyword scoring from task text."""
         task_lower = task.lower()
         skill_tags = getattr(Config, "SKILL_TAGS", {})
 
@@ -364,20 +546,20 @@ Task executed successfully.
             score = 0
             for kw in keywords:
                 if kw in task_lower:
-                    # 多字關鍵字給更高分
+                    # Give higher score to multi-word keywords.
                     score += 2 if " " in kw else 1
             if score > 0:
                 scores[skill_name] = score
 
         if not scores:
-            # 預設：複雜任務至少給一個規劃技能
+            # Default fallback: always include a planning skill.
             return ["planning-and-task-breakdown"]
 
-        # 按分數降序，取前 max_skills 個
+        # Sort by score descending and keep top entries.
         sorted_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         selected = [name for name, _ in sorted_skills[:max_skills]]
 
-        # 確保至少 2 個：如果只有 1 個，參考 SKILL_PRESETS 補充
+        # Ensure at least two skills by using presets when only one is matched.
         if len(selected) == 1:
             presets = getattr(Config, "SKILL_PRESETS", {})
             for preset_skills in presets.values():
@@ -391,19 +573,16 @@ Task executed successfully.
         return selected[:max_skills]
 
     def _preload_skills(self, skill_names: List[str], msgs: List[Dict[str, str]]) -> List[str]:
-        """
-        預載入選定的技能到 System Prompt 中，讓 Agent 從第一步就擁有相關知識。
-        回傳成功載入的技能名稱。
-        """
+        """Preload selected skills into system prompt before the loop starts."""
         loaded = []
         max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
         for skill_name in skill_names:
-            # === 新增：動態保護 ===
+            # Dynamic context protection.
             current_context_size = sum(len(m.get("content", "")) for m in msgs)
-            if current_context_size > 45000:   # 當 context 超過 45k 時強制 offload
+            if current_context_size > 45000:   # Force offload when context exceeds 45k chars.
                 if self.state.loaded_skills:
                     oldest = self.state.loaded_skills.pop(0)
-                    logger.warning(f"⚠️ Context 過大，強制 offload: {oldest}")
+                    logger.warning("⚠️ Context too large, force offload: %s", oldest)
 
             if len(self.state.loaded_skills) >= max_skills:
                 oldest_skill = self.state.loaded_skills.pop(0)
@@ -429,25 +608,68 @@ Task executed successfully.
         return loaded
 
     # ---------- Main loop ----------
+    def _build_mission_prompt(self, task: str) -> str:
+        return (
+            "MISSION REQUIREMENTS:\n"
+            "1) You must call the `plan` action early with concrete steps.\n"
+            "2) For each major step, explicitly check whether it is completed.\n"
+            "3) Only call `mark_done` when all planned items are completed.\n\n"
+            f"USER TASK:\n{task}"
+        )
+
+    def _queue_followup_task(self, original_task: str, step: int, max_steps: int) -> None:
+        trace_summary = self._analyze_current_task_trace()
+        failed_lines = "\n".join(
+            [f"- {action}: {count} failures" for action, count in trace_summary.get("top_failed_actions", [])]
+        ) or "- No explicit failed action patterns found."
+
+        followup = (
+            "CONTINUATION TASK (auto-generated after step limit reached)\n"
+            f"- Previous run stopped at step {step}/{max_steps}.\n"
+            f"- Read workspace/artifacts/traces/{self.current_task_id}.jsonl first, then workspace/state.json.\n"
+            f"- Trace summary: total_steps={trace_summary.get('total_steps', 0)}, "
+            f"failed_steps={trace_summary.get('failed_steps', 0)}, "
+            f"last_action={trace_summary.get('last_action')}.\n"
+            "- Top failed actions:\n"
+            f"{failed_lines}\n"
+            "- Create/refresh a TODO checklist of unfinished items.\n"
+            "- Continue execution until every checklist item is completed.\n"
+            "- Verify completion status explicitly before mark_done.\n\n"
+            "ORIGINAL TASK:\n"
+            f"{original_task}\n"
+        )
+        Config.TODO_FILE.write_text(followup, "utf-8")
+        logger.info("📝 Queued continuation task in todo.txt for unfinished mission.")
+
     def run_task(self, task: str):
         self.reset_counters()
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
+        self.state.task_mode = self._detect_task_mode(task)
+        self.state.shell_profile = "windows" if os.name == "nt" else "unix"
+        self.state.root_dir = str(Config.WORKSPACE_DIR)
+        self.save_state()
+        logger.info(
+            "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
+            os.name,
+            platform.system(),
+            Config.WORKSPACE_DIR,
+        )
 
         msgs: List[Dict[str, str]] = [
             {
                 "role": "system",
                 "content": Config.SYSTEM_PROMPT
             },
-            {"role": "user", "content": task}
+            {"role": "user", "content": self._build_mission_prompt(task)}
         ]
 
-        # === Layer 3: 自動技能路由 ===
+        # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)
         loaded_skills = self._preload_skills(selected_skills, msgs)
         if loaded_skills:
             logger.info("🎯 Auto-loaded %d skills: %s", len(loaded_skills), loaded_skills)
-            # 告訴 Agent 哪些技能已經預載，避免重複載入
+            # Inform agent which skills are preloaded to avoid duplicate loading.
             msgs[0]["content"] += (
                 f"\n\n[AUTO-ROUTED] The following skills were pre-loaded based on task analysis: "
                 f"{', '.join(loaded_skills)}. You may skip list_skills/get_skill for these."
@@ -455,11 +677,15 @@ Task executed successfully.
         else:
             logger.info("ℹ️ No skills auto-loaded. Agent will discover on its own.")
 
-        max_steps = getattr(Config, "MAX_STEPS", 40)
+        max_steps = getattr(Config, "MAX_STEPS", 50)
+        execution_budget = 40
 
+        recent_actions: List[str] = []
         for step in range(1, max_steps + 1):
             self.current_step = step
             logger.info("🧠 Step %s/%s", step, max_steps)
+            phase = "execution" if step <= execution_budget else "planning"
+            self._update_runtime_progress(task, step, max_steps, phase=phase)
 
             # E: if too stuck, hard reset once
             if self.hard_reset_if_needed(msgs):
@@ -475,18 +701,18 @@ Task executed successfully.
                 else:
                     logger.warning("🆘 Agent stuck. Trying local repair first...")
                     
-                    # === 第一階段：本地修復（不呼叫 Gemini）===
+                    # Phase 1: local repair without Gemini
                     local_repair_success = self._try_local_repair()
                     
                     if local_repair_success:
-                        logger.info("✅ 本地修復成功，跳過 Gemini")
+                        logger.info("✅ Local repair succeeded, skipping Gemini rescue.")
                         self.state.error_count = 0
                         self.state.repeat_count = 0
                         self.rescue_cooldown = 1
                         continue
                     
-                    # === 第二階段：真的修復不了才呼叫 Gemini ===
-                    logger.warning("⚠️ 本地修復失敗，呼叫 Gemini rescue...")
+                    # Phase 2: call Gemini only if local repair failed
+                    logger.warning("⚠️ Local repair failed, invoking Gemini rescue...")
                     
                     # Determine stuck reason for better rescue prompt
                     stuck_reason = "Unknown stuck reason."
@@ -500,15 +726,13 @@ Task executed successfully.
                     elif self.state.search_count >= 4:
                         stuck_reason = "SEARCH LOOP: Performed too many consecutive web searches."
 
-                    # === 新增：強制 Agent 總結錯誤 ===
                     error_summary_prompt = (
-                        "你剛剛執行了一個錯誤的動作。\n"
-                        f"錯誤原因：{self.state.last_action} 失敗。\n"
-                        "請用一句話總結你剛剛犯了什麼錯，以及下次應該怎麼做。\n"
-                        "格式：{\"action\":\"plan\",\"kwargs\":{\"steps\":\"我剛剛的錯誤是...，下次我會...\"}}"
+                        "You made an incorrect action.\n"
+                        f"Failure source: action `{self.state.last_action}` failed.\n"
+                        "Summarize the mistake in one sentence and state what to do next time.\n"
+                        "Format: {\"action\":\"plan\",\"kwargs\":{\"steps\":\"My mistake was ...; next I will ...\"}}"
                     )
                     
-                    # 把錯誤總結要求加入歷史
                     msgs.append({
                         "role": "user",
                         "content": error_summary_prompt
@@ -521,12 +745,12 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
 
-                    self.rescue_cooldown = 3   # 呼叫一次 rescue 後，接下來 3 步都不再呼叫
+                    self.rescue_cooldown = 3   # After rescue, skip rescue for next 3 steps.
                     
                     parsed = self.extract_json(rescue_text)
 
@@ -569,7 +793,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -593,13 +817,32 @@ Task executed successfully.
                 kwargs = {}
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
+            if action == "plan":
+                recent_plan_count = sum(1 for a in recent_actions[-9:] if a == "plan")
+                if recent_plan_count >= 2:
+                    msgs.append({
+                        "role": "user",
+                        "content": "PLAN THROTTLE: in any rolling 10 steps, max 2 plan actions. Execute concrete tool action now."
+                    })
+                    continue
 
             # repeat guard
             self.update_repeat_guard(action)
             self.save_state()
+            recent_actions.append(action)
 
             # C + A: store only clean assistant JSON, not raw thoughts
             self.append_clean_assistant(msgs, action, kwargs)
+
+            if step > execution_budget and action not in {"plan", "read_file", "write_file", "mark_done"}:
+                msgs.append({
+                    "role": "user",
+                    "content": (
+                        "PLANNING PHASE ONLY: execution budget was the first 40 steps. "
+                        "Use remaining steps to create or refine the next-task checklist in workspace files."
+                    )
+                })
+                continue
 
             if self.state.repeat_count >= 3:
                 msgs.append({
@@ -614,15 +857,36 @@ Task executed successfully.
 
             # finish
             if action == "mark_done":
+                if self.state.task_mode == "mobile" and not self.state.quality_gate_passed:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "QUALITY GATE REQUIRED: run validate_mobile_quality first. "
+                            "Only call mark_done after build/analyze/test gate passes."
+                        )
+                    })
+                    continue
+                if self.state.task_mode == "mobile" and self.state.quality_gate_web_warning:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "QUALITY GATE POLICY: web warnings must be empty before mark_done. "
+                            "Re-run validate_mobile_quality with strict_web=true and fix web failures."
+                        )
+                    })
+                    continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
                 self._write_antigravity_report(task, True, step)
+                self._update_runtime_progress(
+                    task, step, max_steps, phase=phase, current_action=action, last_result_ok=True, status="completed"
+                )
                 break
 
             # execute
             try:
                 res_data = self.execute_tool_safe(action, kwargs)
                 
-                # 攔截 Skill 載入，將內容直接注入 System Prompt，避免被 History Truncate / Summarize 丟棄
+                # Inject loaded skill content into system prompt to prevent history truncation loss.
                 if action in ["get_skill", "load_preset"] and res_data.get("ok") and "data" in res_data:
                     skill_content = res_data["data"].get("content", "")
                     if skill_content:
@@ -639,11 +903,20 @@ Task executed successfully.
                             
                         summarized = self._summarize_skill(target_name, skill_content)
                         msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
-                        # 避免 context 雙重爆大，將 data 清空
+                        # Avoid doubling context size by replacing heavy data payload.
                         res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
                         
                 if action == "plan" and res_data.get("ok", False):
                     self.state.plan_executed_count += 1
+                if action == "validate_mobile_quality":
+                    validation_data = res_data.get("data") or {}
+                    self.state.quality_gate_passed = bool(
+                        res_data.get("ok", False) and validation_data.get("all_passed", False)
+                    )
+                    self.state.quality_gate_strict_web = bool(validation_data.get("strict_web", True))
+                    warning_rows = [r for r in validation_data.get("results", []) if r.get("step") == "web-validation-warning"]
+                    self.state.quality_gate_web_warning = len(warning_rows) > 0
+                    self.state.quality_gate_web_warning_count = len(warning_rows)
 
             except Exception as e:
                 res_data = {
@@ -658,25 +931,28 @@ Task executed successfully.
                 error_msg = res_data.get("message", "")
                 error_type = res_data.get("error_type", "")
                 
-                # === Error-type specific recovery policies ===
+                # Error-type specific recovery policies
                 if error_type == "tool_not_found" or "missing" in error_msg.lower() or "unexpected keyword" in error_msg.lower():
-                    logger.warning("🚨 偵測到嚴重/工具參數錯誤，立即觸發 Rescue")
-                    self.state.error_count = 3  # 直接拉高到觸發門檻
+                    logger.warning("🚨 Severe/tool parameter error detected, forcing rescue.")
+                    self.state.error_count = 3  # Raise directly to rescue trigger threshold.
                     
-                    # === 新增：提供正確參數格式提示 ===
                     param_hints = {
-                        "read_file": "正確格式：read_file(path='檔案路徑')",
-                        "write_file": "正確格式：write_file(path='檔案路徑', content='內容')",
-                        "get_skill": "正確格式：get_skill(skill_name='技能名稱')",
-                        "plan": "正確格式：plan(steps='步驟內容')",
-                        "run_python_script": "正確格式：run_python_script(code='Python程式碼')",
+                        "read_file": "Correct format: read_file(path='file_path')",
+                        "write_file": "Correct format: write_file(path='file_path', content='...')",
+                        "get_skill": "Correct format: get_skill(skill_name='skill_name')",
+                        "plan": "Correct format: plan(steps='step content')",
+                        "run_python_script": "Correct format: run_python_script(code='python code')",
                     }
                     hint = param_hints.get(action, "")
                     if hint:
-                        logger.warning(f"⚠️ 工具參數錯誤提示: {hint}")
+                        logger.warning("⚠️ Tool parameter hint: %s", hint)
                         res_data["message"] = f"{error_msg}\n{hint}"
                 else:
-                    self.state.error_count += 1  # 執行期錯誤允許重試 2~3 次
+                    self.state.error_count += 1  # Runtime errors allow 2-3 retries.
+                msgs.append({
+                    "role": "user",
+                    "content": self._build_tool_first_repair_prompt(action, res_data)
+                })
             else:
                 self.state.error_count = 0
                 self.state.last_error = None
@@ -686,6 +962,24 @@ Task executed successfully.
             self.append_trace(action, kwargs, res_data)
 
             logger.info("🛠️ %s executed. ok=%s", action, res_data.get("ok", False))
+            self._update_runtime_progress(
+                task,
+                step,
+                max_steps,
+                phase=phase,
+                current_action=action,
+                last_result_ok=bool(res_data.get("ok", False)),
+                status="running",
+            )
+
+            if step == execution_budget:
+                msgs.append({
+                    "role": "user",
+                    "content": (
+                        "STEP 40 REACHED. If task is not complete, switch to planning mode for the next task. "
+                        "Use `plan` and `write_file` to prepare a clear continuation checklist."
+                    )
+                })
 
             # === Success Heuristics + Early Stop ===
             if self.should_early_stop(msgs, step):
@@ -695,6 +989,23 @@ Task executed successfully.
         else:
             logger.warning("Max steps reached.")
             self._write_antigravity_report(task, False, max_steps)
+            self._queue_followup_task(task, max_steps, max_steps)
+            self._update_runtime_progress(
+                task, max_steps, max_steps, phase="planning", current_action=None, last_result_ok=None, status="needs_followup"
+            )
+
+    def _detect_task_mode(self, task: str) -> str:
+        """
+        Detect task mode from explicit schema header.
+        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
+        """
+        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
+        if not match:
+            return "general"
+        mode = match.group(1).strip().upper()
+        if mode in {"STITCH_FLUTTER", "MOBILE"}:
+            return "mobile"
+        return "general"
 
     def start(self):
         logger.info("🤖 Agent V7.2 Active.")

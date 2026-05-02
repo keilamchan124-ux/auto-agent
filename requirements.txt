@@ -6,3 +6,5 @@ requests
 json-repair
 markitdown
 pyTelegramBotAPI
+
+playwright>=1.54.0
