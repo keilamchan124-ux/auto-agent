@@ -482,7 +482,16 @@ Task executed successfully.
             return True, ""
         names = {m.get("name", "").lower() for m in enabled_mcps}
         t = (task or "").lower()
-        if "github" in names and any(k in t for k in ["github", "repository", "repo", "pull request", "pr", "issue"]):
+        repo_signals = [
+            r"\bgithub\b",
+            r"\brepository\b",
+            r"\brepo\b",
+            r"\bpull request\b",
+            r"\bpr\b",
+            r"\bissue\b",
+        ]
+        has_repo_signal = any(re.search(p, t) for p in repo_signals)
+        if "github" in names and has_repo_signal:
             github_actions = {"github_read_file", "github_clone", "github_create_pr", "github_commit_push"}
             if action not in github_actions and action not in {"plan", "read_file"}:
                 return False, (

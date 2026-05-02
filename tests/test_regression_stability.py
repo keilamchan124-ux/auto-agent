@@ -240,6 +240,8 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         ok2, msg2 = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "please update this github repo issue", enabled)
         self.assertFalse(ok2)
         self.assertIn("MCP_USAGE_REQUIRED", msg2)
+        ok3, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "generate REPORT.md with final status", enabled)
+        self.assertTrue(ok3)
 
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
