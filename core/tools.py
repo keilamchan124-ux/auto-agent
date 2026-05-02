@@ -213,19 +213,25 @@ def run_cmd(cmd: str) -> str:
 
         is_windows = os.name == "nt"
 
+        windows_allow = {"dir", "type", "findstr"}
+        unix_allow = {"ls", "cat", "grep", "find", "head"}
+
         if is_windows:
             args = shlex.split(cmd, posix=False)
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
-            if binary == "ls":
-                cmd = "dir" if len(args) == 1 else "dir " + " ".join(args[1:])
-                binary = "dir"
         else:
             args = shlex.split(cmd)
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
+
+        # OS-specific safety gate: block cross-platform shell dialect mismatch.
+        if is_windows and binary in unix_allow:
+            return format_result(False, f"Cross-platform command blocked on Windows: {binary}", error_type="security_error")
+        if (not is_windows) and binary in windows_allow:
+            return format_result(False, f"Cross-platform command blocked on Unix: {binary}", error_type="security_error")
 
         if binary == "cd":
             return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
@@ -251,10 +257,32 @@ def run_cmd(cmd: str) -> str:
                 timeout=30
             )
 
-        out = (r.stdout + r.stderr).strip()
+        stderr_text = (r.stderr or "").strip()
+        out = ((r.stdout or "") + stderr_text).strip()
         if not out:
             out = "Success"
 
+        stderr_lower = stderr_text.lower()
+        stderr_cmd_not_found = any(x in stderr_lower for x in [
+            "not recognized as an internal or external command",
+            "is not recognized",
+            "command not found",
+            "不是內部或外部命令",
+        ])
+        if stderr_cmd_not_found:
+            return format_result(False, _truncate(out, 1200), error_type="execution_error")
+
+        known_cli_error = any(x in out.lower() for x in [
+            "not recognized as an internal or external command",
+            "不是內部或外部命令",
+            "invalid parameter",
+            "參數格式不正確",
+            "無效的參數",
+            "系統找不到指定的路徑",
+            "no such file or directory",
+        ])
+        if r.returncode != 0 or known_cli_error:
+            return format_result(False, _truncate(out, 1200), error_type="execution_error")
         return format_result(True, _truncate(out, 1200))
     except subprocess.TimeoutExpired as e:
         return format_result(False, _friendly_exec_error(e, cmd), error_type="timeout_error")
@@ -274,6 +302,12 @@ def write_file(path: str, content: str) -> str:
 
 def read_file(path: str, full_output: bool = True) -> str:
     try:
+        if not path:
+            return format_result(False, "Empty path.", error_type="io_error")
+        normalized = str(path).replace("\\", "/")
+        cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
+        if cwd.endswith("/workspace") and normalized.startswith("workspace/"):
+            return format_result(False, "Path rule violation: do not prefix with workspace/ when cwd is already workspace.", error_type="io_error")
         p = safe_path(path)
         if not p.exists():
             return format_result(False, "File not found.", error_type="io_error")

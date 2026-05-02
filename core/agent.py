@@ -8,6 +8,8 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict, field
 import json_repair
+import os
+import platform
 
 
 from core.config import Config
@@ -35,6 +37,8 @@ class AgentState:
     quality_gate_web_warning_count: int = 0
     quality_gate_strict_web: bool = True
     task_mode: str = "general"
+    shell_profile: str = "unknown"
+    root_dir: str = ""
 
 class Agent:
     def __init__(self):
@@ -642,6 +646,15 @@ Task executed successfully.
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
         self.state.task_mode = self._detect_task_mode(task)
+        self.state.shell_profile = "windows" if os.name == "nt" else "unix"
+        self.state.root_dir = str(Config.WORKSPACE_DIR)
+        self.save_state()
+        logger.info(
+            "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
+            os.name,
+            platform.system(),
+            Config.WORKSPACE_DIR,
+        )
 
         msgs: List[Dict[str, str]] = [
             {
@@ -667,6 +680,7 @@ Task executed successfully.
         max_steps = getattr(Config, "MAX_STEPS", 50)
         execution_budget = 40
 
+        recent_actions: List[str] = []
         for step in range(1, max_steps + 1):
             self.current_step = step
             logger.info("🧠 Step %s/%s", step, max_steps)
@@ -803,10 +817,19 @@ Task executed successfully.
                 kwargs = {}
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
+            if action == "plan":
+                recent_plan_count = sum(1 for a in recent_actions[-9:] if a == "plan")
+                if recent_plan_count >= 2:
+                    msgs.append({
+                        "role": "user",
+                        "content": "PLAN THROTTLE: in any rolling 10 steps, max 2 plan actions. Execute concrete tool action now."
+                    })
+                    continue
 
             # repeat guard
             self.update_repeat_guard(action)
             self.save_state()
+            recent_actions.append(action)
 
             # C + A: store only clean assistant JSON, not raw thoughts
             self.append_clean_assistant(msgs, action, kwargs)
@@ -970,6 +993,19 @@ Task executed successfully.
             self._update_runtime_progress(
                 task, max_steps, max_steps, phase="planning", current_action=None, last_result_ok=None, status="needs_followup"
             )
+
+    def _detect_task_mode(self, task: str) -> str:
+        """
+        Detect task mode from explicit schema header.
+        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
+        """
+        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
+        if not match:
+            return "general"
+        mode = match.group(1).strip().upper()
+        if mode in {"STITCH_FLUTTER", "MOBILE"}:
+            return "mobile"
+        return "general"
 
     def start(self):
         logger.info("🤖 Agent V7.2 Active.")
