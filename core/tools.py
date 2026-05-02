@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -187,8 +188,24 @@ def download_file(url: str, path: str) -> str:
         return format_result(False, str(e), error_type="download_error")
 
 
+def _friendly_exec_error(err: Exception, cmd: str) -> str:
+    text = str(err)
+    lowered = text.lower()
+
+    if "winerror 2" in lowered or "no such file or directory" in lowered:
+        return (
+            f"Command not found: {cmd}. "
+            "Tip: on Windows, use built-ins like `dir` (cmd.exe) or executables available in PATH."
+        )
+
+    if "timed out" in lowered:
+        return f"Command timed out: {cmd}. Tip: simplify the command or split it into smaller steps."
+
+    return f"Failed to execute command: {cmd}. Details: {text}"
+
+
 def run_cmd(cmd: str) -> str:
-    """Execute shell command with binary allowlist."""
+    """Execute shell command with binary allowlist and cross-platform normalization."""
     try:
         cmd = str(cmd).strip()
         if not cmd:
@@ -200,12 +217,15 @@ def run_cmd(cmd: str) -> str:
             args = shlex.split(cmd, posix=False)
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
-            binary = args[0].strip("\"'")
+            binary = args[0].strip("\"'").lower()
+            if binary == "ls":
+                cmd = "dir" if len(args) == 1 else "dir " + " ".join(args[1:])
+                binary = "dir"
         else:
             args = shlex.split(cmd)
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
-            binary = args[0]
+            binary = args[0].lower()
 
         if binary == "cd":
             return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
@@ -236,10 +256,10 @@ def run_cmd(cmd: str) -> str:
             out = "Success"
 
         return format_result(True, _truncate(out, 1200))
-    except subprocess.TimeoutExpired:
-        return format_result(False, "Command timed out.", error_type="timeout_error")
+    except subprocess.TimeoutExpired as e:
+        return format_result(False, _friendly_exec_error(e, cmd), error_type="timeout_error")
     except Exception as e:
-        return format_result(False, str(e), error_type="execution_error")
+        return format_result(False, _friendly_exec_error(e, cmd), error_type="execution_error")
 
 
 def write_file(path: str, content: str) -> str:
@@ -642,6 +662,396 @@ def list_skills(query: str = "") -> str:
         return format_result(False, f"Failed to list skills: {e}", error_type="runtime_error")
 
 
+def design_to_component_metadata(
+    design_name: str,
+    screens: list | None = None,
+    style_notes: str = "",
+    output_path: str = "design/component_metadata.json",
+) -> str:
+    """Create design metadata and a checklist scaffold from reference images/notes."""
+    try:
+        design_name = str(design_name).strip() or "unnamed_design"
+        screens = screens or []
+        if not isinstance(screens, list):
+            return format_result(False, "screens must be a list.", error_type="validation_error")
+
+        payload = {
+            "design_name": design_name,
+            "style_notes": str(style_notes),
+            "screens": [],
+            "global_checklist": [
+                "Define app navigation map",
+                "Define reusable component library",
+                "Map each screen to component tree",
+                "Implement responsive layout rules",
+                "Add loading/empty/error states",
+                "Add accessibility labels and semantics",
+                "Add unit/widget tests for critical screens",
+            ],
+        }
+
+        for item in screens:
+            if isinstance(item, dict):
+                name = str(item.get("name", "unnamed_screen"))
+                purpose = str(item.get("purpose", ""))
+            else:
+                name = str(item)
+                purpose = ""
+            payload["screens"].append({
+                "name": name,
+                "purpose": purpose,
+                "component_tree": [
+                    {"id": f"{name}_root", "type": "Scaffold", "children": []},
+                ],
+                "screen_checklist": [
+                    "Extract repeated UI blocks into reusable widgets",
+                    "Bind screen state and async data flow",
+                    "Add form/input validation if needed",
+                    "Add golden/snapshot tests",
+                ],
+            })
+
+        p = safe_path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return format_result(True, f"Design metadata scaffold created at {output_path}", data={"path": output_path, "screens": len(payload["screens"])})
+    except Exception as e:
+        return format_result(False, str(e), error_type="io_error")
+
+
+def validate_mobile_quality(
+    project_dir: str = ".",
+    framework: str = "flutter",
+    include_web: bool = True,
+    strict_web: bool = True,
+) -> str:
+    """Run build/test/lint quality gate and return pass/fail summary."""
+    try:
+        project_root = safe_path(project_dir)
+        framework = str(framework).strip().lower()
+        if framework != "flutter":
+            return format_result(False, "Only flutter is supported currently.", error_type="validation_error")
+
+        steps = [
+            ("flutter pub get", ["flutter", "pub", "get"]),
+            ("flutter analyze", ["flutter", "analyze"]),
+            ("flutter test", ["flutter", "test"]),
+            ("flutter build apk --debug", ["flutter", "build", "apk", "--debug"]),
+        ]
+        web_steps = []
+        if include_web:
+            web_steps = [
+                ("flutter build web", ["flutter", "build", "web"]),
+                ("flutter test --platform chrome", ["flutter", "test", "--platform", "chrome"]),
+            ]
+            steps.extend(web_steps)
+        results = []
+        all_passed = True
+        for name, cmd in steps:
+            r = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, timeout=600)
+            out = (r.stdout + "\n" + r.stderr).strip()
+            ok = r.returncode == 0
+            all_passed = all_passed and ok
+            results.append({"step": name, "ok": ok, "output": _truncate(out, 1200)})
+
+        core_passed = all_passed
+        web_warning = False
+        if include_web and not strict_web:
+            web_step_names = {name for name, _ in web_steps}
+            core_results = [r for r in results if r["step"] not in web_step_names]
+            web_results = [r for r in results if r["step"] in web_step_names]
+            core_passed = all(r["ok"] for r in core_results) if core_results else True
+            web_passed = all(r["ok"] for r in web_results) if web_results else True
+            all_passed = core_passed
+            if not web_passed:
+                web_warning = True
+                results.append(
+                    {
+                        "step": "web-validation-warning",
+                        "ok": True,
+                        "output": "Web validation failed but strict_web=false, treating as warning.",
+                    }
+                )
+
+        return format_result(
+            all_passed,
+            (
+                f"Mobile quality gate passed. core_passed={core_passed}, web_warning={web_warning}."
+                if all_passed
+                else f"Mobile quality gate failed. core_passed={core_passed}, web_warning={web_warning}."
+            ),
+            data={
+                "framework": framework,
+                "all_passed": all_passed,
+                "core_passed": core_passed,
+                "web_warning": web_warning,
+                "include_web": include_web,
+                "strict_web": strict_web,
+                "results": results,
+            },
+            error_type=None if all_passed else "quality_gate_failed",
+        )
+    except Exception as e:
+        return format_result(False, str(e), error_type="validation_error")
+
+
+def render_progress_dashboard(output_path: str = "artifacts/dashboard.html") -> str:
+    """Render a simple local dashboard from runtime progress and task summaries."""
+    try:
+        progress_path = Config.WORKSPACE_DIR / "artifacts" / "runtime_progress.json"
+        summary_dir = Config.WORKSPACE_DIR / "artifacts" / "task_summaries"
+
+        progress = {}
+        if progress_path.exists():
+            progress = json.loads(progress_path.read_text("utf-8"))
+
+        summaries = []
+        if summary_dir.exists():
+            for fp in sorted(summary_dir.glob("*.summary.json"))[-30:]:
+                try:
+                    summaries.append(json.loads(fp.read_text("utf-8")))
+                except Exception:
+                    continue
+
+        html = f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>Agent Dashboard</title>
+<style>body{{font-family:Arial;margin:24px}} .card{{border:1px solid #ddd;padding:12px;margin:8px 0;border-radius:8px}}</style>
+</head><body>
+<h1>Agent Runtime Dashboard</h1>
+<div class='card'><h2>Current Progress</h2><pre>{json.dumps(progress, ensure_ascii=False, indent=2)}</pre></div>
+<div class='card'><h2>Task Summaries (latest {len(summaries)})</h2><pre>{json.dumps(summaries, ensure_ascii=False, indent=2)}</pre></div>
+</body></html>"""
+
+        p = safe_path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(html, encoding="utf-8")
+        return format_result(True, f"Dashboard rendered at {output_path}", data={"path": output_path, "summary_count": len(summaries)})
+    except Exception as e:
+        return format_result(False, str(e), error_type="io_error")
+
+
+def capture_web_screenshot(
+    url: str,
+    output_path: str,
+    full_page: bool = True,
+    wait_ms: int = 1500,
+    viewport_width: int = 1440,
+    viewport_height: int = 900,
+) -> str:
+    """Capture a screenshot of a web page using Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return format_result(
+            False,
+            "Playwright is not installed. Install with `pip install playwright` and run `playwright install chromium`.",
+            error_type="dependency_error",
+        )
+
+    try:
+        url = str(url).strip()
+        if not url.startswith("http://") and not url.startswith("https://"):
+            return format_result(False, "url must start with http:// or https://", error_type="validation_error")
+
+        p = safe_path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": int(viewport_width), "height": int(viewport_height)})
+            page.goto(url, wait_until="networkidle", timeout=60_000)
+            if wait_ms > 0:
+                page.wait_for_timeout(int(wait_ms))
+            page.screenshot(path=str(p), full_page=bool(full_page))
+            browser.close()
+
+        return format_result(
+            True,
+            f"Screenshot captured: {output_path}",
+            data={
+                "url": url,
+                "path": output_path,
+                "full_page": bool(full_page),
+                "wait_ms": int(wait_ms),
+                "viewport": {"width": int(viewport_width), "height": int(viewport_height)},
+            },
+        )
+    except Exception as e:
+        return format_result(False, str(e), error_type="screenshot_error")
+
+
+def start_web_server(
+    project_dir: str = "build/web",
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    python_bin: str = "python",
+    task_id: str = "default",
+) -> str:
+    """Start a local static web server and persist server metadata."""
+    try:
+        root = safe_path(project_dir)
+        if not root.exists() or not root.is_dir():
+            return format_result(False, f"Directory not found: {project_dir}", error_type="io_error")
+
+        if python_bin not in Config.ALLOWED_BINARIES:
+            return format_result(False, f"Forbidden python binary: {python_bin}", error_type="security_error")
+
+        cmd = [python_bin, "-m", "http.server", str(int(port)), "--bind", str(host)]
+        log_dir = safe_path("artifacts/web_server_logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = log_dir / "stdout.log"
+        stderr_path = log_dir / "stderr.log"
+        stdout_f = open(stdout_path, "a", encoding="utf-8")
+        stderr_f = open(stderr_path, "a", encoding="utf-8")
+        proc = subprocess.Popen(  # nosec B603,B607 - controlled command and allowlist checked
+            cmd,
+            cwd=root,
+            stdout=stdout_f,
+            stderr=stderr_f,
+            text=True,
+        )
+        stdout_f.close()
+        stderr_f.close()
+        time.sleep(0.3)
+        if proc.poll() is not None:
+            return format_result(False, "Web server process exited during startup.", error_type="execution_error")
+
+        health_url = f"http://{host}:{int(port)}"
+        healthy = False
+        health_error = ""
+        for _ in range(5):
+            try:
+                r = requests.get(health_url, timeout=3)
+                healthy = r.status_code < 500
+                if healthy:
+                    break
+                health_error = f"HTTP status {r.status_code}"
+            except Exception as e:
+                health_error = str(e)
+            time.sleep(0.3)
+
+        server_meta = {
+            "pid": proc.pid,
+            "host": host,
+            "port": int(port),
+            "project_dir": project_dir,
+            "url": health_url,
+            "cmd": cmd,
+            "healthy": healthy,
+            "stdout_log": str(stdout_path.relative_to(Config.WORKSPACE_DIR)),
+            "stderr_log": str(stderr_path.relative_to(Config.WORKSPACE_DIR)),
+        }
+        safe_task = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(task_id).strip() or "default")
+        meta_path = safe_path(f"artifacts/web_server_{safe_task}_{int(port)}.json")
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if not healthy:
+            return format_result(False, f"Web server started but health check failed: {health_error}", data=server_meta, error_type="health_check_failed")
+        return format_result(True, "Web server started and healthy.", data=server_meta)
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
+def stop_web_server(meta_path: str = "artifacts/web_server_default_8787.json") -> str:
+    """Stop local web server using metadata file and remove metadata."""
+    try:
+        p = safe_path(meta_path)
+        if not p.exists():
+            return format_result(False, f"Metadata file not found: {meta_path}", error_type="io_error")
+
+        meta = json.loads(p.read_text("utf-8"))
+        pid = int(meta.get("pid", 0))
+        if pid <= 0:
+            return format_result(False, "Invalid PID in metadata file.", error_type="validation_error")
+
+        stopped = False
+        reason = ""
+        try:
+            if os.name == "nt":
+                r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=15)
+                stopped = r.returncode == 0
+                reason = (r.stdout + r.stderr).strip()
+            else:
+                os.kill(pid, 15)
+                for _ in range(5):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.2)
+                    except ProcessLookupError:
+                        stopped = True
+                        break
+                if not stopped:
+                    os.kill(pid, 9)
+                    stopped = True
+        except ProcessLookupError:
+            stopped = True
+            reason = "Process not found; treated as already stopped."
+
+        p.unlink(missing_ok=True)
+        return format_result(True, "Web server stop flow completed.", data={"pid": pid, "meta_path": meta_path, "stopped": stopped, "reason": reason})
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
+def web_server_status(meta_path: str = "artifacts/web_server_default_8787.json", log_tail_lines: int = 40) -> str:
+    """Get web server status, health, and recent log tails."""
+    try:
+        p = safe_path(meta_path)
+        if not p.exists():
+            return format_result(False, f"Metadata file not found: {meta_path}", error_type="io_error")
+        meta = json.loads(p.read_text("utf-8"))
+        pid = int(meta.get("pid", 0))
+        running = False
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                running = True
+            except Exception:
+                running = False
+
+        url = str(meta.get("url", ""))
+        healthy = False
+        health_error = ""
+        if url:
+            try:
+                r = requests.get(url, timeout=3)
+                healthy = r.status_code < 500
+                if not healthy:
+                    health_error = f"HTTP status {r.status_code}"
+            except Exception as e:
+                health_error = str(e)
+
+        def _tail(rel_path: str) -> str:
+            try:
+                fp = safe_path(rel_path)
+                if not fp.exists():
+                    return ""
+                lines = fp.read_text("utf-8", errors="replace").splitlines()
+                return "\n".join(lines[-max(1, int(log_tail_lines)):])
+            except Exception:
+                return ""
+
+        stdout_tail = _tail(meta.get("stdout_log", ""))
+        stderr_tail = _tail(meta.get("stderr_log", ""))
+        return format_result(
+            True,
+            "Web server status collected.",
+            data={
+                "pid": pid,
+                "running": running,
+                "healthy": healthy,
+                "health_error": health_error,
+                "meta_path": meta_path,
+                "url": url,
+                "stdout_tail": _truncate(stdout_tail, 3000),
+                "stderr_tail": _truncate(stderr_tail, 3000),
+            },
+        )
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
@@ -659,6 +1069,13 @@ TOOLS_REGISTRY = {
     "github_commit_push": github_commit_push,
     "github_create_pr": github_create_pr,
     "browse_page": browse_page,
+    "design_to_component_metadata": design_to_component_metadata,
+    "validate_mobile_quality": validate_mobile_quality,
+    "render_progress_dashboard": render_progress_dashboard,
+    "capture_web_screenshot": capture_web_screenshot,
+    "start_web_server": start_web_server,
+    "stop_web_server": stop_web_server,
+    "web_server_status": web_server_status,
 }
 
 
