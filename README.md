@@ -2,29 +2,55 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
+> Last updated: 2026-05-02 (UTC)
+
 ## Quick start
 
-1. Create and activate Python environment.
+1. Create and activate a Python environment.
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Configure `.env` (at least `MIMO_API_KEY`; set `GEMINI_API_KEY` only if using Gemini rescue backend).
-   - Optional rescue switch:
-     - `RESCUE_BACKEND=gemini` with `RESCUE_MODEL=gemini-3-flash-preview`
-     - `RESCUE_BACKEND=mimo` with `RESCUE_MODEL=gemma-4-31b-it` (or another model available on your MIMO/OpenAI-compatible endpoint)
+3. Configure `.env` (copy from `.env.example`).
+   - Required: `MIMO_API_KEY`
+   - Recommended rescue chain config:
+     - `NIM_API_KEY`
+     - `NIM_BASE_URL=https://integrate.api.nvidia.com/v1`
+     - `NIM_RESCUE_MODEL=z-ai/glm4.7`
+     - `GEMINI_API_KEY`
+     - `GEMINI_MODEL=gemini-3.1-flash-lite-preview`
+     - `RESCUE_MODEL=gemma-4-31b-it`
 4. Run:
    ```bash
    python main.py
    ```
 
-## Core architecture
+## Architecture
 
-- `core/agent.py`: orchestration loop, recovery, continuation, state gating.
-- `core/tools.py`: runtime tools + safety boundaries + web/mobile utilities.
-- `core/config.py`: environment-driven limits, prompt, allowlist, skill metadata.
-- `core/llm.py`: model client wrappers and retry logic.
-- `core/__init__.py`: side-effect-safe package entry.
+- `core/agent.py`: main orchestration loop and task lifecycle.
+- `core/state_trace.py`: runtime progress + trace writing manager.
+- `core/policy_gate.py`: phase-aware MCP/completion gates.
+- `core/recovery.py`, `core/rescue_orchestrator.py`: rescue triggers and orchestration.
+- `core/llm.py`: model clients + fixed rescue chain + decision matrix.
+- `core/tools.py`: tool execution and safety boundaries.
+
+## Fixed rescue chain
+
+Fallback order is deterministic:
+
+1. GLM via NVIDIA NIM
+2. Gemini
+3. Gemma via MIMO/OpenAI-compatible endpoint
+
+`core/llm.py` now includes:
+- `_classify_error_code(...)`
+- `get_rescue_decision(...)` decision matrix
+- `LAST_RESCUE_EVENTS` structured fallback telemetry
+
+## CI workflows
+
+- `prompt-tool-registry-consistency`: ensures prompt action list matches tool registry.
+- `mandatory-minimal-integration`: always runs a minimal non-mock smoke path in CI.
 
 ## Runtime artifacts
 
@@ -34,16 +60,10 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
 - `workspace/artifacts/task_summaries/<task_id>.summary.json`
 - `workspace/artifacts/runtime_progress.json`
 - `workspace/artifacts/dashboard.html`
+- `workspace/artifacts/rescue_events.jsonl`
 
-## Current known gaps (high value fixes)
+## Known gaps
 
-1. Some logic still lives in one large `core/agent.py`; splitting into `loop`, `telemetry`, and `recovery` modules would improve maintainability.
-2. Web-server metadata is file-based and single-node oriented; distributed runner scenarios need stronger ownership/locking.
-3. Smoke integration is optional/env-gated; full CI confidence still depends on environment quality.
-
-## Suggested optimization roadmap
-
-- Extract telemetry writer into `core/telemetry.py`.
-- Extract gate policy into `core/policy.py`.
-- Add stronger integration tests for real Playwright + Flutter environments.
-- Add consistency check ensuring prompt action list stays in sync with tool registry.
+1. `core/agent.py` still contains substantial orchestration complexity.
+2. Web-server lifecycle is file-metadata-based and not distributed-runner safe.
+3. Full mobile/browser integration confidence still depends on runner environment quality.
