@@ -67,7 +67,7 @@ Repeat until all checklist items are complete:
 ### Phase C: Validation gate (mandatory)
 1. `validate_mobile_quality`
    - Must pass `flutter pub get`, `flutter analyze`, `flutter test`, `flutter build apk --debug`, `flutter build web`, and `flutter test --platform chrome`.
-   - Web strictness can be configured via `strict_web` (`False` = treat web check failures as warning, `True` = hard fail).
+   - In Stitch mode, default policy is `strict_web=True` (web failures are hard-fail).
 2. If failed:
    - Return to implementation loop and fix failures.
 3. If passed:

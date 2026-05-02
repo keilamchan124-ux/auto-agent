@@ -112,10 +112,13 @@ class ToolRegressionTests(unittest.TestCase):
 
             fake_proc = mock.Mock()
             fake_proc.pid = 4321
+            fake_proc.poll.return_value = None
 
             with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
                 with mock.patch("core.tools.subprocess.Popen", return_value=fake_proc):
-                    raw = core_tools.start_web_server(project_dir="build/web", host="127.0.0.1", port=8787)
+                    with mock.patch("core.tools.requests.get") as get_mock:
+                        get_mock.return_value.status_code = 200
+                        raw = core_tools.start_web_server(project_dir="build/web", host="127.0.0.1", port=8787)
 
             data = json.loads(raw)
             self.assertTrue(data["ok"])

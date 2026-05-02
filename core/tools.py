@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -722,7 +723,7 @@ def validate_mobile_quality(
     project_dir: str = ".",
     framework: str = "flutter",
     include_web: bool = True,
-    strict_web: bool = False,
+    strict_web: bool = True,
 ) -> str:
     """Run build/test/lint quality gate and return pass/fail summary."""
     try:
@@ -886,27 +887,48 @@ def start_web_server(
             return format_result(False, f"Forbidden python binary: {python_bin}", error_type="security_error")
 
         cmd = [python_bin, "-m", "http.server", str(int(port)), "--bind", str(host)]
+        log_dir = safe_path("artifacts/web_server_logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = log_dir / "stdout.log"
+        stderr_path = log_dir / "stderr.log"
+        stdout_f = open(stdout_path, "a", encoding="utf-8")
+        stderr_f = open(stderr_path, "a", encoding="utf-8")
         proc = subprocess.Popen(  # nosec B603,B607 - controlled command and allowlist checked
             cmd,
             cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_f,
+            stderr=stderr_f,
             text=True,
         )
+        time.sleep(0.4)
+        if proc.poll() is not None:
+            return format_result(False, "Web server process exited during startup.", error_type="execution_error")
+
+        health_url = f"http://{host}:{int(port)}"
+        try:
+            r = requests.get(health_url, timeout=3)
+            healthy = r.status_code < 500
+        except Exception:
+            healthy = False
 
         server_meta = {
             "pid": proc.pid,
             "host": host,
             "port": int(port),
             "project_dir": project_dir,
-            "url": f"http://{host}:{int(port)}",
+            "url": health_url,
             "cmd": cmd,
+            "healthy": healthy,
+            "stdout_log": str(stdout_path.relative_to(Config.WORKSPACE_DIR)),
+            "stderr_log": str(stderr_path.relative_to(Config.WORKSPACE_DIR)),
         }
         meta_path = safe_path("artifacts/web_server.json")
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         meta_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        return format_result(True, "Web server started.", data=server_meta)
+        if not healthy:
+            return format_result(False, "Web server started but health check failed.", data=server_meta, error_type="health_check_failed")
+        return format_result(True, "Web server started and healthy.", data=server_meta)
     except Exception as e:
         return format_result(False, str(e), error_type="execution_error")
 
@@ -924,7 +946,10 @@ def stop_web_server(meta_path: str = "artifacts/web_server.json") -> str:
             return format_result(False, "Invalid PID in metadata file.", error_type="validation_error")
 
         try:
-            os.kill(pid, 15)
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=15)
+            else:
+                os.kill(pid, 15)
         except ProcessLookupError:
             pass
 

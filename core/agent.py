@@ -31,6 +31,8 @@ class AgentState:
     last_error: Optional[str] = None
     plan_executed_count: int = 0
     quality_gate_passed: bool = False
+    quality_gate_web_warning: bool = False
+    quality_gate_strict_web: bool = True
 
 class Agent:
     def __init__(self):
@@ -808,6 +810,15 @@ Task executed successfully.
                         )
                     })
                     continue
+                if self.state.quality_gate_web_warning:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "QUALITY GATE POLICY: web warnings must be empty before mark_done. "
+                            "Re-run validate_mobile_quality with strict_web=true and fix web failures."
+                        )
+                    })
+                    continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
                 self._write_antigravity_report(task, True, step)
                 self._update_runtime_progress(
@@ -842,9 +853,13 @@ Task executed successfully.
                 if action == "plan" and res_data.get("ok", False):
                     self.state.plan_executed_count += 1
                 if action == "validate_mobile_quality":
+                    validation_data = res_data.get("data") or {}
                     self.state.quality_gate_passed = bool(
-                        res_data.get("ok", False) and (res_data.get("data") or {}).get("all_passed", False)
+                        res_data.get("ok", False) and validation_data.get("all_passed", False)
                     )
+                    self.state.quality_gate_strict_web = bool(validation_data.get("strict_web", True))
+                    warning_rows = [r for r in validation_data.get("results", []) if r.get("step") == "web-validation-warning"]
+                    self.state.quality_gate_web_warning = len(warning_rows) > 0
 
             except Exception as e:
                 res_data = {
