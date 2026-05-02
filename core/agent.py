@@ -15,6 +15,8 @@ import platform
 from core.config import Config
 from core import llm
 from core import tools
+from core import telemetry
+from core import policy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -133,19 +135,17 @@ Task executed successfully.
         last_result_ok: Optional[bool] = None,
         status: str = "running",
     ) -> None:
-        progress_path = Config.WORKSPACE_DIR / "artifacts" / "runtime_progress.json"
-        progress_path.parent.mkdir(parents=True, exist_ok=True)
-        progress = {
-            "task_id": self.current_task_id,
-            "task_preview": task[:200],
-            "status": status,
-            "phase": phase,
-            "step": step,
-            "max_steps": max_steps,
-            "progress_pct": round((step / max_steps) * 100, 2) if max_steps > 0 else 0,
-            "current_action": current_action,
-            "last_result_ok": last_result_ok,
-            "state": {
+        telemetry.update_runtime_progress(
+            Config.WORKSPACE_DIR,
+            task_id=self.current_task_id,
+            task=task,
+            step=step,
+            max_steps=max_steps,
+            phase=phase,
+            current_action=current_action,
+            last_result_ok=last_result_ok,
+            status=status,
+            state_snapshot={
                 "repeat_count": self.state.repeat_count,
                 "parse_fail_count": self.state.parse_fail_count,
                 "search_count": self.state.search_count,
@@ -156,9 +156,7 @@ Task executed successfully.
                 "last_error": self.state.last_error,
                 "quality_gate_web_warning_count": self.state.quality_gate_web_warning_count,
             },
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), "utf-8")
+        )
 
     def append_trace(self, action: str, kwargs: dict, result: dict):
         trace_path = Config.WORKSPACE_DIR / "execution_trace.jsonl"
@@ -185,7 +183,7 @@ Task executed successfully.
         task_trace_path = task_trace_dir / f"{self.current_task_id}.jsonl"
         with open(task_trace_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
-        self._rotate_global_trace_if_needed(trace_path)
+        telemetry.rotate_global_trace_if_needed(Config.WORKSPACE_DIR, trace_path)
         self._write_task_summary_index(trace_entry)
 
     def _rotate_global_trace_if_needed(self, trace_path, max_bytes: int = 5_000_000) -> None:
@@ -498,6 +496,10 @@ Task executed successfully.
             if "command" in kwargs:
                 kwargs["cmd"] = str(kwargs.pop("command"))
                 fixed = True
+        elif action == "run_python_script" and "code" not in kwargs:
+            if "script" in kwargs:
+                kwargs["code"] = str(kwargs.pop("script"))
+                fixed = True
                 
         if fixed:
             logger.info("🔧 Auto-fixed %s parameters (one-shot repair): %s -> %s", action, original_kwargs, kwargs)
@@ -756,7 +758,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
+                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -804,7 +806,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
+                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -1020,17 +1022,7 @@ Task executed successfully.
             )
 
     def _detect_task_mode(self, task: str) -> str:
-        """
-        Detect task mode from explicit schema header.
-        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
-        """
-        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
-        if not match:
-            return "general"
-        mode = match.group(1).strip().upper()
-        if mode in {"STITCH_FLUTTER", "MOBILE"}:
-            return "mobile"
-        return "general"
+        return policy.detect_task_mode(task)
 
     def start(self):
         logger.info("🤖 Agent V7.2 Active.")
@@ -1053,15 +1045,3 @@ Task executed successfully.
 
 if __name__ == "__main__":
     Agent().start()
-    def _detect_task_mode(self, task: str) -> str:
-        """
-        Detect task mode from explicit schema header.
-        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
-        """
-        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
-        if not match:
-            return "general"
-        mode = match.group(1).strip().upper()
-        if mode in {"STITCH_FLUTTER", "MOBILE"}:
-            return "mobile"
-        return "general"
