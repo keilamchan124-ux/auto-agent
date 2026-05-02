@@ -473,6 +473,31 @@ Task executed successfully.
             return ""
         return "[MCP ROUTING DIRECTIVE]\n" + "\n".join([f"- {d}" for d in directives])
 
+    def _enforce_mcp_usage_floor(self, action: str, step: int, task: str, enabled_mcps: List[Dict[str, str]]) -> tuple[bool, str]:
+        """
+        Require at least one MCP-correlated action early when task semantics strongly suggest it.
+        This reduces passive MCP exposure where routing hints are ignored.
+        """
+        if step > 8:
+            return True, ""
+        names = {m.get("name", "").lower() for m in enabled_mcps}
+        t = (task or "").lower()
+        if "github" in names and any(k in t for k in ["github", "repository", "repo", "pull request", "pr", "issue"]):
+            github_actions = {"github_read_file", "github_clone", "github_create_pr", "github_commit_push"}
+            if action not in github_actions and action not in {"plan", "read_file"}:
+                return False, (
+                    "MCP_USAGE_REQUIRED: This task is repository-centric. Use a GitHub MCP action early "
+                    "(github_read_file/github_clone/github_create_pr/github_commit_push) before generic actions."
+                )
+        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "screenshot", "visual"]):
+            ui_actions = {"capture_web_screenshot", "web_server_status", "start_web_server"}
+            if action not in ui_actions and action not in {"plan", "run_cmd", "read_file"}:
+                return False, (
+                    "MCP_USAGE_REQUIRED: This task is UI-centric. Use a UI verification action early "
+                    "(start_web_server/capture_web_screenshot/web_server_status)."
+                )
+        return True, ""
+
     def _determine_execution_mode(self, step: int) -> str:
         """
         Unify Skills and MCP usage to avoid mixed noisy behavior.
@@ -913,6 +938,12 @@ Task executed successfully.
                 self.state.error_count += 1
                 msgs.append({"role": "user", "content": lock_msg})
                 self.append_trace(str(action), kwargs, {"ok": False, "message": lock_msg, "error_type": "policy_error"})
+                continue
+            allowed, mcp_msg = self._enforce_mcp_usage_floor(str(action), step, task, enabled_mcps if enabled_mcps else [])
+            if not allowed:
+                self.state.error_count += 1
+                msgs.append({"role": "user", "content": mcp_msg})
+                self.append_trace(str(action), kwargs, {"ok": False, "message": mcp_msg, "error_type": "policy_error"})
                 continue
 
             kwargs = self._auto_fix_kwargs(action, kwargs)

@@ -167,6 +167,7 @@ class ToolRegressionTests(unittest.TestCase):
             self.assertIn("line2", data["data"]["stdout_tail"])
 
 
+
 class PromptRegistryConsistencyTests(unittest.TestCase):
     def test_prompt_actions_exist_in_registry(self):
         prompt = Config._BASE_PROMPT
@@ -230,6 +231,15 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         self.assertTrue(gate.enforce_mcp_phase_hard_gate("capture_web_screenshot", True))
         self.assertFalse(gate.enforce_mcp_phase_hard_gate("download_file", True))
         self.assertFalse(gate.enforce_completion_lock("mark_done", True))
+
+    def test_agent_mcp_usage_floor_requires_github_action_early(self):
+        agent = Agent.__new__(Agent)
+        enabled = [{"name": "github", "role": "repo context"}]
+        ok, _ = Agent._enforce_mcp_usage_floor(agent, "plan", 2, "please update this github repo issue", enabled)
+        self.assertTrue(ok)
+        ok2, msg2 = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "please update this github repo issue", enabled)
+        self.assertFalse(ok2)
+        self.assertIn("MCP_USAGE_REQUIRED", msg2)
 
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")

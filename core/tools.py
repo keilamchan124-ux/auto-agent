@@ -297,10 +297,26 @@ def run_cmd(cmd: str) -> str:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
 
-        if binary in {"ls", "dir"}:
+        if binary in {"ls", "dir", "mkdir", "md", "cat", "type"}:
             # Allow standard listing commands directly; this reduces unproductive
             # policy loops and mirrors common shell usage.
             pass
+
+        # Cross-platform command normalization to reduce repetitive policy failures.
+        if is_windows and binary == "cat":
+            # `cat foo` -> `type foo`
+            cmd = re.sub(r"^\s*cat\b", "type", cmd, flags=re.IGNORECASE)
+            binary = "type"
+        if is_windows and binary == "ls":
+            # `ls`/`ls -la path` -> `dir path`
+            ls_tokens = shlex.split(cmd, posix=False)
+            target = ""
+            if len(ls_tokens) > 1:
+                # Ignore unix flags like -la and keep the first non-flag token as target.
+                non_flags = [t for t in ls_tokens[1:] if not str(t).startswith("-")]
+                target = non_flags[0] if non_flags else ""
+            cmd = f'dir {target}'.strip()
+            binary = "dir"
 
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
         if is_windows and binary in unix_allow and binary != "ls":
@@ -504,11 +520,19 @@ socket.socket.connect = _safe_connect
         script_path = safe_path(".temp_agent_script.py")
         script_path.write_text(code, encoding="utf-8")
 
-        # Prefer python3 when allowed, otherwise fallback to python.
-        cmd_exe = "python3" if "python3" in Config.ALLOWED_BINARIES else "python"
-        
+        # Prefer platform-appropriate Python launcher.
+        if os.name == "nt":
+            if "py" in Config.ALLOWED_BINARIES:
+                run_args = ["py", "-3", str(script_path)]
+            elif "python" in Config.ALLOWED_BINARIES:
+                run_args = ["python", str(script_path)]
+            else:
+                run_args = ["python3", str(script_path)]
+        else:
+            run_args = ["python3", str(script_path)] if "python3" in Config.ALLOWED_BINARIES else ["python", str(script_path)]
+
         r = subprocess.run(
-            [cmd_exe, str(script_path)],
+            run_args,
             cwd=Config.WORKSPACE_DIR,
             capture_output=True,
             text=True,
