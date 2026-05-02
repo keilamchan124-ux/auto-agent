@@ -105,7 +105,8 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
     })
 
     # Route rescue through configured backend.
-    if Config.RESCUE_BACKEND == "mimo":
+    rescue_backend = getattr(Config, "RESCUE_BACKEND", "mimo")
+    if rescue_backend == "mimo":
         return _call_mimo_rescue(contents, retries=retries)
     return _call_gemini_rescue(contents, retries=retries)
 
@@ -117,7 +118,7 @@ def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     for attempt in range(retries + 1):
         try:
             response = GEMINI_CLIENT.models.generate_content(
-                model=Config.RESCUE_MODEL or Config.GEMINI_MODEL,
+                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "GEMINI_MODEL", "gemini-3.1-flash-lite-preview")),
                 contents=contents
             )
             return getattr(response, "text", "") or ""
@@ -146,7 +147,7 @@ def _call_mimo_rescue(contents: list, retries: int = 2) -> str:
     for attempt in range(retries + 1):
         try:
             res = MIMO_CLIENT.chat.completions.create(
-                model=Config.RESCUE_MODEL or Config.MIMO_MODEL,
+                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "MIMO_MODEL", "mimo-v2.5-pro")),
                 messages=rescue_messages,
                 temperature=0.0,
             )

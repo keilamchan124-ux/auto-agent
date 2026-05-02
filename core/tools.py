@@ -20,6 +20,41 @@ from markitdown import MarkItDown
 from core.config import Config
 
 logger = logging.getLogger("Tools")
+_POLICY_ERROR_STREAK = {"type": None, "count": 0}
+
+
+def _policy_repair_template(policy_type: str, detail: str) -> str:
+    return format_result(
+        False,
+        f"POLICY REPAIR REQUIRED ({policy_type}): {detail}",
+        error_type="policy_error",
+        data={
+            "repair_template": {
+                "mode": "forced",
+                "options": [
+                    "A: path fix",
+                    "B: command fix",
+                    "C: environment verify",
+                ],
+            }
+        },
+    )
+
+
+def _track_policy_error(policy_type: str, detail: str) -> str:
+    if _POLICY_ERROR_STREAK["type"] == policy_type:
+        _POLICY_ERROR_STREAK["count"] += 1
+    else:
+        _POLICY_ERROR_STREAK["type"] = policy_type
+        _POLICY_ERROR_STREAK["count"] = 1
+    if _POLICY_ERROR_STREAK["count"] >= 2:
+        return _policy_repair_template(policy_type, detail)
+    return format_result(False, detail, error_type="policy_error")
+
+
+def _reset_policy_error_streak() -> None:
+    _POLICY_ERROR_STREAK["type"] = None
+    _POLICY_ERROR_STREAK["count"] = 0
 
 
 def format_result(ok: bool, message: str, data: Dict[str, Any] = None, error_type: str = None) -> str:
@@ -221,17 +256,37 @@ def run_cmd(cmd: str) -> str:
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
+            if binary == "ls":
+                return _track_policy_error(
+                    "command",
+                    "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
+                )
+            elif binary == "cat":
+                binary = "type"
+                cmd = "type" if len(args) == 1 else f"type {' '.join(args[1:])}"
+            elif binary == "pwd":
+                binary = "cd"
+                cmd = "cd"
+            elif binary == "find" and "|" in cmd and "head" in cmd:
+                cmd = "dir /s /b"
+                binary = "dir"
         else:
             args = shlex.split(cmd)
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
 
+        if binary == "dir":
+            return _track_policy_error(
+                "command",
+                "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
+            )
+
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
         if is_windows and binary in unix_allow:
-            return format_result(False, f"Cross-platform command blocked on Windows: {binary}", error_type="security_error")
+            return _track_policy_error("command", f"Cross-platform command blocked on Windows: {binary}")
         if (not is_windows) and binary in windows_allow:
-            return format_result(False, f"Cross-platform command blocked on Unix: {binary}", error_type="security_error")
+            return _track_policy_error("command", f"Cross-platform command blocked on Unix: {binary}")
 
         if binary == "cd":
             return format_result(False, "The 'cd' command is not supported. All commands run in the workspace root automatically. Please use relative or absolute paths directly.", error_type="execution_error")
@@ -283,6 +338,7 @@ def run_cmd(cmd: str) -> str:
         ])
         if r.returncode != 0 or known_cli_error:
             return format_result(False, _truncate(out, 1200), error_type="execution_error")
+        _reset_policy_error_streak()
         return format_result(True, _truncate(out, 1200))
     except subprocess.TimeoutExpired as e:
         return format_result(False, _friendly_exec_error(e, cmd), error_type="timeout_error")
@@ -292,6 +348,10 @@ def run_cmd(cmd: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     try:
+        normalized = str(path).replace("\\", "/")
+        cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
+        if cwd.endswith("/workspace") and normalized.startswith("workspace/demo_counter_app"):
+            return _track_policy_error("path", "Use cwd-relative create-project path (demo_counter_app/...), not workspace/demo_counter_app/...")
         p = safe_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(str(content), encoding="utf-8")
@@ -307,7 +367,11 @@ def read_file(path: str, full_output: bool = True) -> str:
         normalized = str(path).replace("\\", "/")
         cwd = str(Config.WORKSPACE_DIR).replace("\\", "/")
         if cwd.endswith("/workspace") and normalized.startswith("workspace/"):
-            return format_result(False, "Path rule violation: do not prefix with workspace/ when cwd is already workspace.", error_type="io_error")
+            stripped = normalized[len("workspace/"):]
+            if not stripped:
+                return _track_policy_error("path", "Path rule violation: empty path after workspace/ prefix.")
+            normalized = stripped
+            path = stripped
         p = safe_path(path)
         if not p.exists():
             return format_result(False, "File not found.", error_type="io_error")
@@ -318,6 +382,7 @@ def read_file(path: str, full_output: bool = True) -> str:
         if full_output:
             return format_result(True, "Read file success.", data={"content": _truncate(text, 30000), "mode": "full"})
         summary = _smart_file_summary(text, head=80, tail=20)
+        _reset_policy_error_streak()
         return format_result(
             True,
             "Read file success.",
