@@ -14,17 +14,16 @@ class Config:
     # ===== MODELS =====
     MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
-    RESCUE_BACKEND = os.getenv("RESCUE_BACKEND", "mimo").strip().lower()  # gemini | mimo
-    _RESCUE_MODEL_RAW = os.getenv("RESCUE_MODEL", "").strip()
-    if _RESCUE_MODEL_RAW:
-        RESCUE_MODEL = _RESCUE_MODEL_RAW
-    elif RESCUE_BACKEND == "mimo":
-        RESCUE_MODEL = "gemma-4-31b-it"
-    else:
-        RESCUE_MODEL = GEMINI_MODEL
+    # Single fixed rescue chain: GLM-4.7 -> Gemini 3.1 Flash Lite -> Gemma 4 31B
+    RESCUE_MODEL = os.getenv("RESCUE_MODEL", "").strip() or "gemma-4-31b-it"
 
     # Base URL (with fallback)
     MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "").strip() or None
+
+    # ===== NVIDIA NIM direct rescue =====
+    NIM_API_KEY = os.getenv("NIM_API_KEY", "").strip() or os.getenv("NIM_GATEWAY_API_KEY", "").strip()
+    NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").strip().rstrip("/")
+    NIM_RESCUE_MODEL = os.getenv("NIM_RESCUE_MODEL", "").strip() or os.getenv("NIM_DEEPSEEK_MODEL", "z-ai/glm4.7")
 
     # ===== WORKSPACE =====
     WORKSPACE_DIR = Path(os.getenv("WORKSPACE_DIR", "workspace")).resolve()
