@@ -1,19 +1,49 @@
-# MyProject
+# Agent V7.2
 
-這是一個基於 Python 與 LLM 的智慧代理 (Agent) 專案。
+Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-## 目錄結構
+## Quick start
 
-- `core/` - 系統核心程式 (包含最新的 `agent.py`, `llm.py`, `config.py` 等)
-- `workspace/` - Agent 的工作區，包含目前的執行狀態 (`state.json`) 以及執行軌跡 (`execution_trace.jsonl`)
-- `docs/history/` - 存放過去的歷史任務記錄與相關檔案
+1. Create and activate Python environment.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Configure `.env` (at least `MIMO_API_KEY`; set `GEMINI_API_KEY` only if using Gemini rescue backend).
+   - Optional rescue switch:
+     - `RESCUE_BACKEND=gemini` with `RESCUE_MODEL=gemini-3-flash-preview`
+     - `RESCUE_BACKEND=mimo` with `RESCUE_MODEL=gemma-4-31b-it` (or another model available on your MIMO/OpenAI-compatible endpoint)
+4. Run:
+   ```bash
+   python main.py
+   ```
 
-## 執行方式
+## Core architecture
 
-如果需要保持 Agent 24/7 不間斷運作，可以直接點擊或執行根目錄下的批次檔：
+- `core/agent.py`: orchestration loop, recovery, continuation, state gating.
+- `core/tools.py`: runtime tools + safety boundaries + web/mobile utilities.
+- `core/config.py`: environment-driven limits, prompt, allowlist, skill metadata.
+- `core/llm.py`: model client wrappers and retry logic.
+- `core/__init__.py`: side-effect-safe package entry.
 
-```bat
-start_247_agent.bat
-```
+## Runtime artifacts
 
-也可以直接透過命令列手動啟動：`python core/agent.py`
+- `workspace/state.json`
+- `workspace/execution_trace.jsonl`
+- `workspace/artifacts/traces/<task_id>.jsonl`
+- `workspace/artifacts/task_summaries/<task_id>.summary.json`
+- `workspace/artifacts/runtime_progress.json`
+- `workspace/artifacts/dashboard.html`
+
+## Current known gaps (high value fixes)
+
+1. Some logic still lives in one large `core/agent.py`; splitting into `loop`, `telemetry`, and `recovery` modules would improve maintainability.
+2. Web-server metadata is file-based and single-node oriented; distributed runner scenarios need stronger ownership/locking.
+3. Smoke integration is optional/env-gated; full CI confidence still depends on environment quality.
+
+## Suggested optimization roadmap
+
+- Extract telemetry writer into `core/telemetry.py`.
+- Extract gate policy into `core/policy.py`.
+- Add stronger integration tests for real Playwright + Flutter environments.
+- Add consistency check ensuring prompt action list stays in sync with tool registry.

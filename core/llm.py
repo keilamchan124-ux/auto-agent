@@ -10,7 +10,7 @@ from core.config import Config
 
 logger = logging.getLogger("LLM")
 
-GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY)
+GEMINI_CLIENT = genai.Client(api_key=Config.GEMINI_API_KEY) if Config.GEMINI_API_KEY else None
 
 MIMO_CLIENT = OpenAI(
     api_key=Config.MIMO_API_KEY,
@@ -104,24 +104,60 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
         "parts": [{"text": rescue_prompt}]
     })
 
+    # Route rescue through configured backend.
+    rescue_backend = getattr(Config, "RESCUE_BACKEND", "mimo")
+    if rescue_backend == "mimo":
+        return _call_mimo_rescue(contents, retries=retries)
+    return _call_gemini_rescue(contents, retries=retries)
+
+
+def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
+    if GEMINI_CLIENT is None:
+        raise RuntimeError("GEMINI_API_KEY is not set for gemini rescue backend.")
     last_err = None
     for attempt in range(retries + 1):
         try:
             response = GEMINI_CLIENT.models.generate_content(
-                model=Config.GEMINI_MODEL,
+                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "GEMINI_MODEL", "gemini-2.5-flash")),
                 contents=contents
             )
-            text = getattr(response, "text", "") or ""
-            return text
+            return getattr(response, "text", "") or ""
         except Exception as e:
             last_err = e
             logger.warning("Gemini rescue failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                raise e  # 將 429 錯誤拋出給外層處理 Fallback
+                raise e
             if attempt < retries:
                 _sleep_backoff(attempt)
-
     logger.error("call_gemini_rescue failed: %s", last_err)
+    return "```json\n{\"action\":\"error\",\"kwargs\":{}}\n```"
+
+
+def _call_mimo_rescue(contents: list, retries: int = 2) -> str:
+    last_err = None
+    rescue_messages = []
+    for c in contents:
+        role = "assistant" if c.get("role") == "model" else "user"
+        text = ""
+        parts = c.get("parts") or []
+        if parts and isinstance(parts[0], dict):
+            text = _normalize_text(parts[0].get("text", ""))
+        rescue_messages.append({"role": role, "content": text})
+
+    for attempt in range(retries + 1):
+        try:
+            res = MIMO_CLIENT.chat.completions.create(
+                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "MIMO_MODEL", "mimo-v2.5-pro")),
+                messages=rescue_messages,
+                temperature=0.0,
+            )
+            return (res.choices[0].message.content or "").strip()
+        except Exception as e:
+            last_err = e
+            logger.warning("MIMO rescue failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
+            if attempt < retries:
+                _sleep_backoff(attempt)
+    logger.error("call_mimo_rescue failed: %s", last_err)
     return "```json\n{\"action\":\"error\",\"kwargs\":{}}\n```"
 
 
