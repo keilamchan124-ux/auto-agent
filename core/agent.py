@@ -1028,3 +1028,15 @@ Task executed successfully.
 
 if __name__ == "__main__":
     Agent().start()
+    def _detect_task_mode(self, task: str) -> str:
+        """
+        Detect task mode from explicit schema header.
+        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
+        """
+        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
+        if not match:
+            return "general"
+        mode = match.group(1).strip().upper()
+        if mode in {"STITCH_FLUTTER", "MOBILE"}:
+            return "mobile"
+        return "general"
