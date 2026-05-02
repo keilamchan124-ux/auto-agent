@@ -1,10 +1,39 @@
-python-dotenv
-openai
-google-genai
-duckduckgo-search
-requests
-json-repair
-markitdown
-pyTelegramBotAPI
+# =====================
+# Core Dependencies
+# =====================
+python-dotenv>=1.0.0
+requests>=2.31.0
+httpx>=0.27.0          # 現代非同步 HTTP 客戶端（推薦）
+pydantic>=2.7.0        # 資料模型驗證（強烈建議，用於 MCP）
 
+# =====================
+# AI / LLM
+# =====================
+openai>=1.30.0
+google-genai>=0.1.0
+
+# =====================
+# Web & Browser
+# =====================
 playwright>=1.54.0
+beautifulsoup4>=4.12.0
+lxml>=5.2.0            # 加速 HTML 解析
+
+# =====================
+# Search & Tools
+# =====================
+duckduckgo-search>=6.1.0
+markitdown>=0.0.1a3
+
+# =====================
+# GitHub Integration (建議新增)
+# =====================
+PyGithub>=2.3.0
+
+# =====================
+# Utilities
+# =====================
+json-repair>=0.15.0
+pyTelegramBotAPI>=4.18.0
+rich>=13.7.0           # 更好的終端機輸出（可選）
+loguru>=0.7.2          # 更好的日誌系統（可選）
