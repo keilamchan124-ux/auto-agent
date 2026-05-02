@@ -13,8 +13,8 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
    - Quick start: copy `.env.example` to `.env` and fill your real keys.
    - Rescue fallback order is fixed: `GLM-4.7 > Gemini 3.1 flash lite > Gemma 4`.
    - Configure GLM via NIM gateway bridge:
-     - `NIM_GATEWAY_API_KEY=...`
-     - `NIM_GATEWAY_BASE_URL=...` (your OpenAI-compatible conversion gateway URL)
+     - `NIM_API_KEY=...`
+     - `NIM_BASE_URL=https://integrate.api.nvidia.com/v1`
      - `NIM_RESCUE_MODEL=glm-4.7`
    - Configure Gemini fallback:
      - `GEMINI_API_KEY=...`

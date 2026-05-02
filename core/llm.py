@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 
 from openai import OpenAI
 from google import genai
+import requests
 from core.config import Config
 
 logger = logging.getLogger("LLM")
@@ -110,7 +111,7 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
 
     contents.append({"role": "user", "parts": [{"text": rescue_prompt}]})
 
-    # Priority chain: GLM-4.7 (NIM gateway) > Gemini > Gemma 4 (MIMO/OpenAI-compatible)
+    # Priority chain: GLM-4.7 (NVIDIA NIM) > Gemini > Gemma 4 (MIMO/OpenAI-compatible)
     nim_err = None
     try:
         return _call_nim_rescue(contents, retries=retries)
@@ -119,42 +120,50 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
         logger.warning("GLM rescue unavailable, fallback to Gemini: %s", e)
 
     try:
-        gemini_result = _call_gemini_rescue(contents, retries=retries)
-        if _is_error_action_payload(gemini_result):
-            logger.warning("Gemini rescue returned error action payload; falling back to Gemma 4.")
-        else:
-            return gemini_result
+        return _call_gemini_rescue(contents, retries=retries)
     except Exception as e:
         logger.warning("Gemini rescue unavailable, fallback to Gemma 4: %s", e)
-
-    if nim_err:
-        logger.debug("Earlier GLM/NIM error: %s", nim_err)
+        if nim_err:
+            logger.debug("Earlier GLM/NIM error: %s", nim_err)
 
     return _call_mimo_rescue(contents, retries=retries)
 
 
 def _call_nim_rescue(contents: list, retries: int = 2) -> str:
-    if NIM_GATEWAY_CLIENT is None:
-        raise RuntimeError("NIM gateway is not configured. Set NIM_GATEWAY_API_KEY and NIM_GATEWAY_BASE_URL.")
+    if not Config.NIM_API_KEY:
+        raise RuntimeError("NIM rescue is not configured. Set NIM_API_KEY.")
 
-    rescue_messages = []
+    nim_messages = []
     for c in contents:
         role = "assistant" if c.get("role") == "model" else "user"
         text = ""
         parts = c.get("parts") or []
         if parts and isinstance(parts[0], dict):
             text = _normalize_text(parts[0].get("text", ""))
-        rescue_messages.append({"role": role, "content": text})
+        nim_messages.append({"role": role, "content": text})
 
+    payload = {
+        "model": getattr(Config, "NIM_RESCUE_MODEL", "z-ai/glm4.7"),
+        "messages": nim_messages,
+        "temperature": 0.0,
+        "top_p": 1,
+        "max_tokens": 16384,
+        "stream": False,
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "authorization": f"Bearer {Config.NIM_API_KEY}",
+    }
+
+    url = f"{Config.NIM_BASE_URL}/chat/completions"
     last_err = None
     for attempt in range(retries + 1):
         try:
-            res = NIM_GATEWAY_CLIENT.chat.completions.create(
-                model=getattr(Config, "NIM_RESCUE_MODEL", "glm-4.7"),
-                messages=rescue_messages,
-                temperature=0.0,
-            )
-            return (res.choices[0].message.content or "").strip()
+            res = requests.post(url, json=payload, headers=headers, timeout=120)
+            res.raise_for_status()
+            data = res.json()
+            return _normalize_text(data["choices"][0]["message"]["content"]).strip()
         except Exception as e:
             last_err = e
             logger.warning("GLM rescue failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
@@ -170,7 +179,7 @@ def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     for attempt in range(retries + 1):
         try:
             response = GEMINI_CLIENT.models.generate_content(
-                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "GEMINI_MODEL", "gemini-3.1-flash-lite-preview")),
+                model=getattr(Config, "GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
                 contents=contents
             )
             return getattr(response, "text", "") or ""

@@ -754,7 +754,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
+                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -802,7 +802,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
+                            logger.warning("❌ Rescue backend unavailable (Gemini quota exhausted), using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
