@@ -1,77 +1,76 @@
-# Agent V7.2 — Architecture Context (2026)
+# Agent V7.2 — Architecture Context (Maintainer Edition)
 
-This document is the operational architecture guide for maintainers and automation agents.
+## 1) Runtime model
 
-## 1) System model
-
-Agent V7.2 is a loop-based executor:
+The system is an autonomous execution loop:
 
 1. Read task
-2. Ask model for next action JSON
+2. Ask model for action JSON
 3. Execute tool
-4. Persist trace/progress
-5. Recover or continue until done
+4. Persist progress/trace
+5. Recover or continue
 
-Primary model: Mimo. Rescue model: Gemini.
+Primary model is Mimo, rescue model is Gemini.
 
-## 2) Core modules and boundaries
+## 2) Module boundaries
 
-- `core/agent.py`
-  - Owns orchestration, retry/recovery, step budgets, continuation task queuing.
-  - Writes runtime progress and task/global traces.
-- `core/tools.py`
-  - Executes all runtime tools with a stable JSON result schema.
-  - Enforces workspace path safety and command allowlist constraints.
-- `core/config.py`
-  - Loads environment config and prompt rules.
-  - Defines step limits, binary allowlist, domain policies, and skill metadata.
-- `core/llm.py`
-  - Encapsulates model calls and retry/backoff behavior.
-- `core/__init__.py`
-  - Kept side-effect free (no eager module initialization).
+- `main.py`: single-instance bootstrap and lifecycle entrypoint.
+- `core/agent.py`: orchestration, guards, rescue flow, continuation queueing.
+- `core/tools.py`: all executable tools with structured JSON output.
+- `core/config.py`: env config, prompt rules, limits, allowlists.
+- `core/llm.py`: model wrappers with retry/backoff.
 
-## 3) Reliability and continuation mechanics
+## 3) Observability topology
 
-- Structured action parsing with repair fallback.
-- Loop guards for repeat/search/error/parse-fail pressure.
-- Step-budget split for long tasks:
-  - execution window
-  - planning window
-- Automatic continuation task queue when unfinished.
-- Quality gate before completion (`validate_mobile_quality`).
+- Global trace: `workspace/execution_trace.jsonl`
+- Task trace: `workspace/artifacts/traces/<task_id>.jsonl`
+- Task summary: `workspace/artifacts/task_summaries/<task_id>.summary.json`
+- Live progress: `workspace/artifacts/runtime_progress.json`
+- Dashboard: `workspace/artifacts/dashboard.html`
 
-## 4) Observability architecture
+## 4) Stitch/Flutter workflow
 
-Artifacts are designed for low-overhead monitoring and postmortem replay:
+Stitch mode uses explicit task schema:
 
-- `workspace/state.json`
-- `workspace/execution_trace.jsonl` (global)
-- `workspace/artifacts/traces/<task_id>.jsonl` (task scoped)
-- `workspace/artifacts/task_summaries/<task_id>.summary.json`
-- `workspace/artifacts/runtime_progress.json`
-- `workspace/artifacts/dashboard.html`
+- `[MODE]=STITCH_FLUTTER`
 
-Global trace rotation prevents unbounded growth; task-scoped traces keep continuation context clean.
+Typical loop:
 
-## 5) Stitch/Flutter mode
+1. Build web (`flutter build web`)
+2. Start local server (`start_web_server`)
+3. Capture screenshot (`capture_web_screenshot`)
+4. Compare against metadata/checklist
+5. Validate quality (`validate_mobile_quality`)
+6. Stop local server (`stop_web_server`)
 
-For design-reference development, follow `STITCH_MODE.md`:
+## 5) Current shortcomings and possible bugs
 
-- Design metadata scaffold generation
-- Build web + start local server + screenshot capture loop
-- Metadata/checklist comparison
-- Mandatory quality gate before `mark_done`
+### A. Architecture density
+`core/agent.py` still holds many responsibilities (loop, telemetry, continuation, policy, rescue). This raises regression risk when touching one area.
 
-## 6) Current architectural optimizations applied
+### B. Web-server lifecycle complexity
+Even with start/stop/status tools, server lifecycle correctness still depends on metadata integrity and process ownership assumptions.
 
-1. Reduced import-time side effects in `core` package initialization.
-2. Standardized docs around current runtime topology.
-3. Stabilized regression tests against current module boundaries.
-4. Added dedicated tools for web visual loop (`start_web_server`, `capture_web_screenshot`).
+### C. Environment-sensitive validation
+Flutter and browser-dependent checks can fail due to environment drift rather than product defects.
 
-## 7) Recommended next refactors
+### D. Optional smoke CI
+Smoke integration is intentionally optional. This reduces mandatory CI friction but leaves gaps unless teams enable it consistently.
 
-- Move artifact writing into a dedicated `core/telemetry.py` module.
-- Split `core/agent.py` into `loop`, `recovery`, and `continuation` components.
-- Add typed tool result models to reduce schema drift.
-- Add CI checks for doc/tool registry consistency.
+## 6) Recommended improvements
+
+1. Split `core/agent.py` into focused modules:
+   - `core/loop.py`
+   - `core/recovery.py`
+   - `core/telemetry.py`
+   - `core/policy.py`
+2. Add metadata ownership fields and lock semantics for web-server artifacts.
+3. Add policy-level mode contracts (`general`, `mobile`, `stitch_flutter`) with explicit gate requirements.
+4. Add more real integration assertions in smoke tests (visual diff thresholds, stable startup retries, artifact sanity checks).
+
+## 7) Quality principles for future changes
+
+- Keep tool schemas stable (`ok`, `message`, `data`, `error_type`).
+- Preserve deterministic fallback behavior.
+- Keep prompts and tool registry synchronized.
+- Keep all comments/messages in English for maintainability.

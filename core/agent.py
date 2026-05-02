@@ -55,25 +55,25 @@ class Agent:
         self.state = AgentState()
 
     def _try_local_repair(self) -> bool:
-        """嘗試本地修復，不呼叫 Gemini"""
+        """Attempt local repair without calling Gemini."""
         last_action = self.state.last_action
         
-        # 針對常見錯誤的本地修復
+        # Local fixes for common parameter mistakes
         if last_action == "plan":
             if "missing" in str(self.state.last_error).lower():
-                logger.info("🔧 偵測到 plan 參數錯誤，嘗試本地修正")
+                logger.info("🔧 Detected plan parameter error, trying local fix.")
                 return True
         
         if last_action == "get_skill":
             if "missing" in str(self.state.last_error).lower():
-                logger.info("🔧 偵測到 get_skill 參數錯誤，嘗試本地修正")
+                logger.info("🔧 Detected get_skill parameter error, trying local fix.")
                 return True
         
         return False
 
     def _simple_fallback_plan(self) -> str:
-        """當 Gemini 無法使用時的簡單 fallback"""
-        return """```json\n{"action":"plan","kwargs":{"steps":"1. 分析剛剛的錯誤\\n2. 使用正確的參數格式重試\\n3. 如果還是失敗，嘗試其他方法或跳過此步驟"}}\n```"""
+        """Simple fallback plan when Gemini is unavailable."""
+        return """```json\n{"action":"plan","kwargs":{"steps":"1. Analyze the previous error\\n2. Retry with correct parameters\\n3. If still failing, switch strategy or skip this step"}}\n```"""
 
     def save_state(self):
         self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
@@ -83,7 +83,7 @@ class Agent:
         self.save_state()
 
     def _clean_workspace(self):
-        """清理 workspace，只保留重要檔案"""
+        """Clean workspace while preserving important files."""
         important_files = {"state.json", "execution_trace.jsonl", "todo.txt"}
         
         for item in Config.WORKSPACE_DIR.iterdir():
@@ -93,7 +93,7 @@ class Agent:
                 except Exception as e:
                     logger.warning(f"Failed to delete {item.name}: {e}")
             elif item.is_dir():
-                # 刪除臨時資料夾，保留 artifacts 及隱藏目錄
+                # Remove temporary folders, keep artifacts and hidden control folders.
                 if item.name not in {"artifacts", ".agents", ".antigravity"}:
                     try:
                         shutil.rmtree(item)
@@ -360,18 +360,55 @@ Task executed successfully.
         """
         compact = {
             "ok": bool(result.get("ok", False)),
-            "msg": str(result.get("message", ""))  # Do not hard-truncate to 120 chars
+            "status": "ok" if bool(result.get("ok", False)) else "error",
+            "msg": str(result.get("message", ""))
         }
-        if "data" in result:
-            compact["data"] = result["data"]
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        top_issues: List[str] = []
+        next_actions: List[str] = []
+
+        if isinstance(data.get("results"), list):
+            failed = [r for r in data["results"] if isinstance(r, dict) and not r.get("ok", True)]
+            top_issues.extend([str(r.get("step", "unknown")) for r in failed[:3]])
+            next_actions.extend([f"Fix failing step: {str(r.get('step', 'unknown'))}" for r in failed[:2]])
 
         if not compact["ok"]:
             compact["err"] = str(result.get("error_type", "error"))
+            if not top_issues:
+                top_issues.append(compact["err"])
+            if not next_actions:
+                next_actions.append("Apply a targeted fix and rerun the failing tool.")
+
+        compact["top_issues"] = top_issues[:3]
+        compact["next_actions"] = next_actions[:3]
 
         msgs.append({
             "role": "user",
             "content": json.dumps({"result": compact}, ensure_ascii=False)
         })
+
+    def _build_tool_first_repair_prompt(self, action: str, result: Dict[str, Any]) -> str:
+        error_type = str(result.get("error_type", "runtime_error"))
+        message = str(result.get("message", "")).strip()
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        failed_steps: List[str] = []
+        if isinstance(data.get("results"), list):
+            failed_steps = [
+                str(r.get("step", "unknown"))
+                for r in data.get("results", [])
+                if isinstance(r, dict) and not r.get("ok", True)
+            ][:3]
+        return (
+            "TOOL-FIRST REPAIR BRANCHING:\n"
+            f"- failed_action: {action}\n"
+            f"- error_type: {error_type}\n"
+            f"- failed_steps: {failed_steps}\n"
+            f"- top_error: {message[:240]}\n"
+            "- choose one and execute next:\n"
+            "A) patch code/config and rerun the same tool\n"
+            "B) resolve one missing dependency/input and rerun the same tool\n"
+            "C) if blocked, do minimal fallback and continue highest-impact step"
+        )
 
     # ---------- Guards ----------
     def update_repeat_guard(self, action: str) -> None:
@@ -384,11 +421,11 @@ Task executed successfully.
     def should_force_rescue(self) -> bool:
         """
         Error-type specific recovery policies:
-        - 嚴重錯誤/工具參數 (error_count 被手動設為 >= 3): immediate
-        - 執行錯誤 (error_count >= 3): allow 2~3 retries, then rescue
-        - 格式錯誤 (parse_fail_count >= 2): handled inside loop
-        - 重複動作 (repeat_count >= 2)
-        - 搜尋迴圈 (search_count >= 4)
+        - severe/tool-parameter errors: immediate rescue
+        - runtime errors: allow limited retries, then rescue
+        - format errors: handled after repeated parse failures
+        - repeated-action loops
+        - search loops
         """
         if self.state.error_count >= 3:
             return True
@@ -401,7 +438,7 @@ Task executed successfully.
         return False
 
     def should_early_stop(self, msgs: List[Dict[str, str]], current_step: int) -> bool:
-        """Early Stop 機制已取消，永遠不提早結束 (Success Heuristics disabled)"""
+        """Early-stop heuristics disabled; never stop early."""
         return False
 
     def hard_reset_if_needed(self, msgs: List[Dict[str, str]]) -> bool:
@@ -462,15 +499,12 @@ Task executed successfully.
         return kwargs
 
     def _summarize_skill(self, skill_name: str, full_content: str) -> str:
-        """
-        方案 A：精簡注入 (Skill Lean Injection)
-        把原本動輒數千字的技能說明，濃縮到指定字數內，保留最重要規則。
-        """
+        """Summarize long skill content into a compact injection format."""
         max_chars = getattr(Config, "SKILL_SUMMARY_MAX_CHARS", 600)
         if len(full_content) <= max_chars:
             return full_content
             
-        # 嘗試保留大綱和重點
+        # Preserve key headings and important bullet points.
         lines = full_content.split('\n')
         summary = []
         current_length = 0
@@ -479,29 +513,26 @@ Task executed successfully.
             stripped = line.strip()
             if not stripped: continue
             
-            # 優先保留標題 (##) 和重點列表 (-)
+            # Prefer headings and bullet-point rules.
             if stripped.startswith("#") or stripped.startswith("-") or stripped.startswith("*"):
                 summary.append(line)
                 current_length += len(line)
-            elif current_length < max_chars // 2: # 保留開頭的簡介段落
+            elif current_length < max_chars // 2: # Preserve introductory context.
                 summary.append(line)
                 current_length += len(line)
                 
             if current_length >= max_chars:
-                summary.append("...(已截斷，詳情已省略以節省 Context，請遵循上述核心原則)")
+                summary.append("...(truncated to save context; follow the core rules above)")
                 break
                 
         if not summary:
-            return full_content[:max_chars] + "...\n(已截斷)"
+            return full_content[:max_chars] + "...\n(truncated)"
             
         return "\n".join(summary)
 
     # ---------- Auto Skill Router (Layer 3) ----------
     def _auto_select_skills(self, task: str, max_skills: int = 4) -> List[str]:
-        """
-        規則式技能路由：根據任務文本的關鍵字匹配，自動選擇最相關的 2~4 個技能。
-        用簡單的 keyword scoring —— 零成本、零延遲、不需要額外 API call。
-        """
+        """Rule-based skill routing using keyword scoring from task text."""
         task_lower = task.lower()
         skill_tags = getattr(Config, "SKILL_TAGS", {})
 
@@ -511,20 +542,20 @@ Task executed successfully.
             score = 0
             for kw in keywords:
                 if kw in task_lower:
-                    # 多字關鍵字給更高分
+                    # Give higher score to multi-word keywords.
                     score += 2 if " " in kw else 1
             if score > 0:
                 scores[skill_name] = score
 
         if not scores:
-            # 預設：複雜任務至少給一個規劃技能
+            # Default fallback: always include a planning skill.
             return ["planning-and-task-breakdown"]
 
-        # 按分數降序，取前 max_skills 個
+        # Sort by score descending and keep top entries.
         sorted_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         selected = [name for name, _ in sorted_skills[:max_skills]]
 
-        # 確保至少 2 個：如果只有 1 個，參考 SKILL_PRESETS 補充
+        # Ensure at least two skills by using presets when only one is matched.
         if len(selected) == 1:
             presets = getattr(Config, "SKILL_PRESETS", {})
             for preset_skills in presets.values():
@@ -538,19 +569,16 @@ Task executed successfully.
         return selected[:max_skills]
 
     def _preload_skills(self, skill_names: List[str], msgs: List[Dict[str, str]]) -> List[str]:
-        """
-        預載入選定的技能到 System Prompt 中，讓 Agent 從第一步就擁有相關知識。
-        回傳成功載入的技能名稱。
-        """
+        """Preload selected skills into system prompt before the loop starts."""
         loaded = []
         max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
         for skill_name in skill_names:
-            # === 新增：動態保護 ===
+            # Dynamic context protection.
             current_context_size = sum(len(m.get("content", "")) for m in msgs)
-            if current_context_size > 45000:   # 當 context 超過 45k 時強制 offload
+            if current_context_size > 45000:   # Force offload when context exceeds 45k chars.
                 if self.state.loaded_skills:
                     oldest = self.state.loaded_skills.pop(0)
-                    logger.warning(f"⚠️ Context 過大，強制 offload: {oldest}")
+                    logger.warning("⚠️ Context too large, force offload: %s", oldest)
 
             if len(self.state.loaded_skills) >= max_skills:
                 oldest_skill = self.state.loaded_skills.pop(0)
@@ -613,8 +641,7 @@ Task executed successfully.
         self.reset_counters()
         self._clean_workspace()
         self.current_task_id = f"task_{int(time.time())}"
-        task_lower = task.lower()
-        self.state.task_mode = "mobile" if ("[mode] stitch_flutter" in task_lower or "flutter" in task_lower) else "general"
+        self.state.task_mode = self._detect_task_mode(task)
 
         msgs: List[Dict[str, str]] = [
             {
@@ -624,12 +651,12 @@ Task executed successfully.
             {"role": "user", "content": self._build_mission_prompt(task)}
         ]
 
-        # === Layer 3: 自動技能路由 ===
+        # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)
         loaded_skills = self._preload_skills(selected_skills, msgs)
         if loaded_skills:
             logger.info("🎯 Auto-loaded %d skills: %s", len(loaded_skills), loaded_skills)
-            # 告訴 Agent 哪些技能已經預載，避免重複載入
+            # Inform agent which skills are preloaded to avoid duplicate loading.
             msgs[0]["content"] += (
                 f"\n\n[AUTO-ROUTED] The following skills were pre-loaded based on task analysis: "
                 f"{', '.join(loaded_skills)}. You may skip list_skills/get_skill for these."
@@ -704,7 +731,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -752,7 +779,7 @@ Task executed successfully.
                         )
                     except Exception as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            logger.warning("❌ Gemini 額度用完，使用簡單 fallback")
+                            logger.warning("❌ Gemini quota exhausted, using simple fallback.")
                             rescue_text = self._simple_fallback_plan()
                         else:
                             raise e
@@ -899,6 +926,10 @@ Task executed successfully.
                         res_data["message"] = f"{error_msg}\n{hint}"
                 else:
                     self.state.error_count += 1  # Runtime errors allow 2-3 retries.
+                msgs.append({
+                    "role": "user",
+                    "content": self._build_tool_first_repair_prompt(action, res_data)
+                })
             else:
                 self.state.error_count = 0
                 self.state.last_error = None
@@ -961,3 +992,15 @@ Task executed successfully.
 
 if __name__ == "__main__":
     Agent().start()
+    def _detect_task_mode(self, task: str) -> str:
+        """
+        Detect task mode from explicit schema header.
+        Expected format: [MODE]=STITCH_FLUTTER (or GENERAL).
+        """
+        match = re.search(r"^\s*\[MODE\]\s*=\s*([A-Z0-9_]+)\s*$", task, re.MULTILINE)
+        if not match:
+            return "general"
+        mode = match.group(1).strip().upper()
+        if mode in {"STITCH_FLUTTER", "MOBILE"}:
+            return "mobile"
+        return "general"

@@ -1,55 +1,46 @@
 # Agent V7.2
 
-A loop-driven autonomous Python agent for task execution, recovery, and artifacted observability.
-
-## What it does
-
-- Reads tasks from `todo.txt`
-- Plans and executes tool actions via LLM output
-- Persists runtime state, traces, and summaries
-- Auto-recovers from format/tool/runtime failures
-- Supports long-running Stitch/Flutter workflows
+Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
 ## Quick start
 
-1. Create and activate a Python environment.
+1. Create and activate Python environment.
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Configure `.env` (at minimum: `MIMO_API_KEY`, `GEMINI_API_KEY`).
+3. Configure `.env` (at least `MIMO_API_KEY`, `GEMINI_API_KEY`).
 4. Run:
    ```bash
    python main.py
    ```
 
-## Project layout
+## Core architecture
 
-- `main.py` — single-instance bootstrap and run loop entrypoint
-- `core/agent.py` — orchestration, loop policy, recovery, progress/trace lifecycle
-- `core/tools.py` — tool implementations, safety boundaries, mobile/design/web helpers
-- `core/config.py` — environment-driven config and system prompt
-- `telegram_bot.py` — remote task submission interface
-- `analyze_trace.py` — trace summarization utility
-- `STITCH_MODE.md` — design-reference Flutter execution mode
+- `core/agent.py`: orchestration loop, recovery, continuation, state gating.
+- `core/tools.py`: runtime tools + safety boundaries + web/mobile utilities.
+- `core/config.py`: environment-driven limits, prompt, allowlist, skill metadata.
+- `core/llm.py`: model client wrappers and retry logic.
+- `core/__init__.py`: side-effect-safe package entry.
 
 ## Runtime artifacts
 
-- `workspace/state.json` — loop counters and error pressure
-- `workspace/execution_trace.jsonl` — global trace stream
-- `workspace/artifacts/traces/<task_id>.jsonl` — task-scoped trace
-- `workspace/artifacts/task_summaries/<task_id>.summary.json` — fast per-task index
-- `workspace/artifacts/runtime_progress.json` — live progress snapshot
-- `workspace/artifacts/dashboard.html` — rendered monitoring dashboard
+- `workspace/state.json`
+- `workspace/execution_trace.jsonl`
+- `workspace/artifacts/traces/<task_id>.jsonl`
+- `workspace/artifacts/task_summaries/<task_id>.summary.json`
+- `workspace/artifacts/runtime_progress.json`
+- `workspace/artifacts/dashboard.html`
 
-## Architecture improvements in this revision
+## Current known gaps (high value fixes)
 
-- Package import side effects reduced: `core/__init__.py` no longer eagerly imports all submodules.
-- Documentation normalized around one source-of-truth workflow (`README.md` + `AI_CONTEXT.md` + `STITCH_MODE.md`).
-- Test baseline aligned with current module topology (`tests/test_regression_stability.py`).
+1. Some logic still lives in one large `core/agent.py`; splitting into `loop`, `telemetry`, and `recovery` modules would improve maintainability.
+2. Web-server metadata is file-based and single-node oriented; distributed runner scenarios need stronger ownership/locking.
+3. Smoke integration is optional/env-gated; full CI confidence still depends on environment quality.
 
-## Development guardrails
+## Suggested optimization roadmap
 
-- Keep tool output schema stable (`ok/message/data/error_type`).
-- Keep action parameter names consistent with `execute_tool` mapping.
-- Prefer small iterative changes with explicit validation gates.
+- Extract telemetry writer into `core/telemetry.py`.
+- Extract gate policy into `core/policy.py`.
+- Add stronger integration tests for real Playwright + Flutter environments.
+- Add consistency check ensuring prompt action list stays in sync with tool registry.

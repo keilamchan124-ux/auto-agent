@@ -885,6 +885,7 @@ def start_web_server(
     host: str = "127.0.0.1",
     port: int = 8787,
     python_bin: str = "python",
+    task_id: str = "default",
 ) -> str:
     """Start a local static web server and persist server metadata."""
     try:
@@ -940,7 +941,8 @@ def start_web_server(
             "stdout_log": str(stdout_path.relative_to(Config.WORKSPACE_DIR)),
             "stderr_log": str(stderr_path.relative_to(Config.WORKSPACE_DIR)),
         }
-        meta_path = safe_path("artifacts/web_server.json")
+        safe_task = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(task_id).strip() or "default")
+        meta_path = safe_path(f"artifacts/web_server_{safe_task}_{int(port)}.json")
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         meta_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -951,7 +953,7 @@ def start_web_server(
         return format_result(False, str(e), error_type="execution_error")
 
 
-def stop_web_server(meta_path: str = "artifacts/web_server.json") -> str:
+def stop_web_server(meta_path: str = "artifacts/web_server_default_8787.json") -> str:
     """Stop local web server using metadata file and remove metadata."""
     try:
         p = safe_path(meta_path)
@@ -992,6 +994,64 @@ def stop_web_server(meta_path: str = "artifacts/web_server.json") -> str:
         return format_result(False, str(e), error_type="execution_error")
 
 
+def web_server_status(meta_path: str = "artifacts/web_server_default_8787.json", log_tail_lines: int = 40) -> str:
+    """Get web server status, health, and recent log tails."""
+    try:
+        p = safe_path(meta_path)
+        if not p.exists():
+            return format_result(False, f"Metadata file not found: {meta_path}", error_type="io_error")
+        meta = json.loads(p.read_text("utf-8"))
+        pid = int(meta.get("pid", 0))
+        running = False
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                running = True
+            except Exception:
+                running = False
+
+        url = str(meta.get("url", ""))
+        healthy = False
+        health_error = ""
+        if url:
+            try:
+                r = requests.get(url, timeout=3)
+                healthy = r.status_code < 500
+                if not healthy:
+                    health_error = f"HTTP status {r.status_code}"
+            except Exception as e:
+                health_error = str(e)
+
+        def _tail(rel_path: str) -> str:
+            try:
+                fp = safe_path(rel_path)
+                if not fp.exists():
+                    return ""
+                lines = fp.read_text("utf-8", errors="replace").splitlines()
+                return "\n".join(lines[-max(1, int(log_tail_lines)):])
+            except Exception:
+                return ""
+
+        stdout_tail = _tail(meta.get("stdout_log", ""))
+        stderr_tail = _tail(meta.get("stderr_log", ""))
+        return format_result(
+            True,
+            "Web server status collected.",
+            data={
+                "pid": pid,
+                "running": running,
+                "healthy": healthy,
+                "health_error": health_error,
+                "meta_path": meta_path,
+                "url": url,
+                "stdout_tail": _truncate(stdout_tail, 3000),
+                "stderr_tail": _truncate(stderr_tail, 3000),
+            },
+        )
+    except Exception as e:
+        return format_result(False, str(e), error_type="execution_error")
+
+
 TOOLS_REGISTRY = {
     "web_search": web_search,
     "download_file": download_file,
@@ -1015,6 +1075,7 @@ TOOLS_REGISTRY = {
     "capture_web_screenshot": capture_web_screenshot,
     "start_web_server": start_web_server,
     "stop_web_server": stop_web_server,
+    "web_server_status": web_server_status,
 }
 
 

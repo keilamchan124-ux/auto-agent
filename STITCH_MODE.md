@@ -1,109 +1,86 @@
 # Stitch Reference Development Mode
 
-This mode is designed for long-running autonomous Flutter development using design references (for example, Stitch-generated screens).
+This playbook defines a reliable long-running Flutter workflow using Stitch design references.
 
-## 1) Mission task template
+## 1) Required task schema
 
-Use this template as the input task (`todo.txt`) for each feature batch.
+Use this exact header in `todo.txt`:
 
 ```text
-[MODE] STITCH_FLUTTER
+[MODE]=STITCH_FLUTTER
 [GOAL] Build/extend mobile app screens from Stitch references.
 
 [INPUTS]
-- design_refs: (list of image links or local file paths)
-- product_requirements: (bullet list)
-- tech_constraints: (Flutter version, package limits, target Android/iOS)
-- acceptance_checks: (must-pass checks)
-
-[OUTPUTS REQUIRED]
-1. design/component_metadata.json
-2. implementation checklist file
-3. code changes for target screens/components
-4. test updates
-5. quality gate result (analyze/test/build)
-6. dashboard update
-
-[RULES]
-- Plan first, then execute incrementally.
-- Keep each change small and testable.
-- If execution budget is exhausted, generate continuation checklist and queue next task.
-- Never call mark_done until quality gate passes.
+- design_refs: list of image links or local file paths
+- product_requirements: bullet list
+- tech_constraints: Flutter version, package limits, target Android/iOS
+- acceptance_checks: must-pass checks
 ```
 
-## 2) Tool-call strategy
+If `[MODE]=STITCH_FLUTTER` is missing, mobile-specific gate behavior is not guaranteed.
 
-### Phase A: Intake and planning
+## 2) Standard execution phases
+
+### Phase A — Intake and planning
 1. `plan`
-   - Create a step list with explicit milestones.
 2. `design_to_component_metadata`
-   - Convert design refs into component-tree metadata and checklists.
-3. `write_file`
-   - Save iteration checklist (`design/iteration_checklist.md`).
+3. `write_file` (iteration checklist)
 
-### Phase B: Implementation loop
-Repeat until all checklist items are complete:
+### Phase B — Implementation loop
+Repeat until checklist is complete:
 1. `read_file` / `github_read_file`
-   - Inspect current code and metadata.
 2. `write_file` / `run_cmd`
-   - Implement one screen or one reusable component at a time.
-3. `run_cmd`
-   - Run focused checks (format/lint/local build command where applicable).
-4. `append trace + progress`
-   - Already handled by the agent runtime.
+3. `run_cmd` for focused checks
+4. rely on runtime trace/progress artifacts
 
-### Phase B.5: Web visual feedback loop (mandatory for web-first review)
-1. `run_cmd`
-   - Build web: `flutter build web`
-2. `start_web_server`
-   - Start local server from `build/web` and persist server metadata.
+### Phase C — Web visual validation loop
+1. `run_cmd` -> `flutter build web`
+2. `start_web_server` with `task_id` and port
 3. `capture_web_screenshot`
-   - Capture reference screenshots from the running web app.
-4. `design_to_component_metadata` / `read_file`
-   - Compare screenshot outcomes with metadata and checklist gaps.
-5. Stop server or reuse controlled session for next iteration.
-   - Preferred: call `stop_web_server` when an iteration ends.
+4. `web_server_status` for health + log-tail checks
+5. compare results against metadata/checklist
+6. `stop_web_server` using the exact metadata path
 
-### Phase C: Validation gate (mandatory)
-1. `validate_mobile_quality`
-   - Must pass `flutter pub get`, `flutter analyze`, `flutter test`, `flutter build apk --debug`, `flutter build web`, and `flutter test --platform chrome`.
-   - In Stitch mode, default policy is `strict_web=True` (web failures are hard-fail).
-2. If failed:
-   - Return to implementation loop and fix failures.
-3. If passed:
-   - Continue to completion checks.
+### Phase D — Quality gate (mandatory)
+Call `validate_mobile_quality`.
 
-### Phase D: Completion and reporting
-1. `render_progress_dashboard`
-   - Refresh dashboard artifact.
-2. `read_file` on checklist + metadata
-   - Confirm all planned items are complete.
-3. `mark_done`
-   - Allowed only after gate pass and completion checks.
+Default policy in Stitch mode:
+- `include_web=true`
+- `strict_web=true`
 
-## 3) Definition of Done (DoD)
+Required checks:
+- `flutter pub get`
+- `flutter analyze`
+- `flutter test`
+- `flutter build apk --debug`
+- `flutter build web`
+- `flutter test --platform chrome`
 
-A task is complete only if all conditions are true:
+### Phase E — Completion
+Call `mark_done` only when all are true:
+1. metadata and checklist complete
+2. quality gate passed
+3. web warning count is zero
+4. dashboard and traces updated
 
-1. **Design mapping complete**
-   - `design/component_metadata.json` exists and includes all target screens.
-2. **Checklist complete**
-   - No unchecked implementation items remain.
-3. **Code complete**
-   - Screens/components compile and integrate with app navigation/state.
-4. **Quality gate passed**
-   - `validate_mobile_quality` returns `all_passed=true`.
-5. **Observability updated**
-   - `runtime_progress.json`, per-task trace, and dashboard are updated.
-6. **Handoff-ready summary**
-   - `mark_done` summary states what was built, tested, and any follow-up work.
+## 3) Artifact contract
 
-## 4) Long-running continuation policy
+Expected artifacts:
+- `design/component_metadata.json`
+- `workspace/artifacts/runtime_progress.json`
+- `workspace/artifacts/traces/<task_id>.jsonl`
+- `workspace/artifacts/task_summaries/<task_id>.summary.json`
+- `workspace/artifacts/dashboard.html`
+- `workspace/artifacts/web_server_<task_id>_<port>.json`
+- `workspace/artifacts/web_server_logs/stdout.log`
+- `workspace/artifacts/web_server_logs/stderr.log`
 
-- Use the first execution budget window for coding and integration.
-- If unfinished, use planning window to produce the next checklist batch.
-- Agent auto-queues continuation tasks with trace summary context.
-- Always resume from task-scoped trace (`workspace/artifacts/traces/<task_id>.jsonl`).
+## 4) Continuation policy for long runs
+
+- Use execution window for coding.
+- Use planning window for next-batch checklist.
+- If unfinished, rely on auto-queued continuation task.
+- Resume from task-scoped trace first, not global trace.
 
 ## 5) Recommended companion skills
 
@@ -113,3 +90,43 @@ A task is complete only if all conditions are true:
 - `debugging-and-error-recovery`
 - `test-driven-development`
 - `code-review-and-quality`
+
+## 6) Lowest-risk way to reduce model load (without reducing capability)
+
+If you want to lower token pressure **without making the agent weaker**, use this exact order:
+
+1. **Keep the same quality gate and tools; only compress context shape.**
+   - Do not remove `validate_mobile_quality`, screenshot checks, or trace writes.
+   - Replace long free-form replanning with structured deltas.
+
+2. **Run a fixed preflight before the main loop.**
+   - `design_to_component_metadata`
+   - `run_cmd` -> `flutter build web`
+   - `start_web_server`
+   - `capture_web_screenshot`
+   - `web_server_status`
+   This prevents repeated "what should I do next" reasoning in later steps.
+
+3. **Default to lean reads.**
+   - Use partial/targeted file reads first.
+   - Escalate to full-file reads only when patch context is insufficient.
+
+4. **Use a 10-step cadence with bounded planning.**
+   - Steps 1-7: implementation and focused checks
+   - Step 8: screenshot + server health
+   - Step 9: quality quick-check
+   - Step 10: micro-plan for next cycle (delta only)
+   This keeps decision overhead stable even in long sessions.
+
+5. **Use tool-first failure summaries.**
+   - On gate failure, first produce machine summaries (`failed_steps`, top errors, path hints).
+   - Then ask the model only for repair strategy selection.
+   This avoids costly full-context re-analysis after every failure.
+
+6. **Version plans by diff, not rewrite.**
+   - Persist immutable base plan.
+   - Append only changed checklist items per cycle.
+
+### Why this is the most effective
+
+It reduces repeated cognitive work (token-heavy planning loops) while preserving all high-signal checks and artifacts. In practice, this lowers model load primarily by **workflow regularization**, not by cutting validation depth.

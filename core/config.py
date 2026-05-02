@@ -25,7 +25,7 @@ class Config:
 
     # ===== AGENT CONTROL =====
     MAX_STEPS = int(os.getenv("MAX_STEPS", 50))
-    MAX_HISTORY = int(os.getenv("MAX_HISTORY", 20))
+    MAX_HISTORY = int(os.getenv("MAX_HISTORY", 10))
     MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", 60000))  # higher context budget for multiple skills
     POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", 2))
 
@@ -172,6 +172,7 @@ class Config:
         "| render_progress_dashboard | Render runtime progress + task summary dashboard |\n"
         "| capture_web_screenshot | Capture web screenshots via Playwright for visual validation |\n"
         "| start_web_server | Start local static web server for screenshot/testing loop |\n"
+        "| stop_web_server, web_server_status | Stop/check web server with metadata and log tails |\n"
         "| git_commit | Version control |\n"
         "| mark_done | Control action (handled by agent loop, not tool registry) |\n\n"
         

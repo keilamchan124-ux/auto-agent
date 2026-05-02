@@ -3,7 +3,9 @@ name: optional-smoke-integration
 on:
   workflow_dispatch:
   push:
-    branches: ["work"]
+    branches: ["main", "work"]
+  pull_request:
+    branches: ["main"]
 
 jobs:
   smoke-integration:

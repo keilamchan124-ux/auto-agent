@@ -118,26 +118,53 @@ class ToolRegressionTests(unittest.TestCase):
                 with mock.patch("core.tools.subprocess.Popen", return_value=fake_proc):
                     with mock.patch("core.tools.requests.get") as get_mock:
                         get_mock.return_value.status_code = 200
-                        raw = core_tools.start_web_server(project_dir="build/web", host="127.0.0.1", port=8787)
+                        raw = core_tools.start_web_server(project_dir="build/web", host="127.0.0.1", port=8787, task_id="task_1")
 
             data = json.loads(raw)
             self.assertTrue(data["ok"])
             self.assertEqual(data["data"]["pid"], 4321)
             self.assertTrue(data["data"]["healthy"])
-            self.assertTrue((workspace / "artifacts" / "web_server.json").exists())
+            self.assertTrue((workspace / "artifacts" / "web_server_task_1_8787.json").exists())
 
     def test_stop_web_server_removes_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             meta_dir = workspace / "artifacts"
             meta_dir.mkdir(parents=True, exist_ok=True)
-            (meta_dir / "web_server.json").write_text(json.dumps({"pid": 999999}), "utf-8")
+            (meta_dir / "web_server_default_8787.json").write_text(json.dumps({"pid": 999999}), "utf-8")
             with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
                 raw = core_tools.stop_web_server()
             data = json.loads(raw)
             self.assertTrue(data["ok"])
             self.assertTrue(data["data"]["stopped"])
-            self.assertFalse((meta_dir / "web_server.json").exists())
+            self.assertFalse((meta_dir / "web_server_default_8787.json").exists())
+
+    def test_web_server_status_reports_log_tails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            logs_dir = workspace / "artifacts" / "web_server_logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / "stdout.log").write_text("line1\nline2\n", "utf-8")
+            (logs_dir / "stderr.log").write_text("err1\n", "utf-8")
+            meta_path = workspace / "artifacts" / "web_server_default_8787.json"
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 999999,
+                        "url": "http://127.0.0.1:8787",
+                        "stdout_log": "artifacts/web_server_logs/stdout.log",
+                        "stderr_log": "artifacts/web_server_logs/stderr.log",
+                    }
+                ),
+                "utf-8",
+            )
+            with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
+                with mock.patch("core.tools.requests.get") as get_mock:
+                    get_mock.return_value.status_code = 200
+                    raw = core_tools.web_server_status()
+            data = json.loads(raw)
+            self.assertTrue(data["ok"])
+            self.assertIn("line2", data["data"]["stdout_tail"])
 
 
 class PromptRegistryConsistencyTests(unittest.TestCase):
@@ -173,7 +200,7 @@ class SmokeIntegrationTests(unittest.TestCase):
             web_dir.mkdir(parents=True, exist_ok=True)
             (web_dir / "index.html").write_text("<html><body><h1>smoke</h1></body></html>", "utf-8")
             with mock.patch.object(core_tools.Config, "WORKSPACE_DIR", workspace):
-                start_result = json.loads(core_tools.start_web_server(project_dir="build/web", port=8788))
+                start_result = json.loads(core_tools.start_web_server(project_dir="build/web", port=8788, task_id="smoke"))
                 self.assertTrue(start_result.get("ok"))
                 self.assertTrue(start_result["data"].get("healthy"))
 
@@ -197,7 +224,7 @@ class SmokeIntegrationTests(unittest.TestCase):
                 steps = [r["step"] for r in quality_result.get("data", {}).get("results", [])]
                 self.assertIn("flutter pub get", steps)
                 self.assertIn("flutter build web", steps)
-                stopped = json.loads(core_tools.stop_web_server())
+                stopped = json.loads(core_tools.stop_web_server(meta_path="artifacts/web_server_smoke_8788.json"))
                 self.assertTrue(stopped.get("ok"))
 
 
