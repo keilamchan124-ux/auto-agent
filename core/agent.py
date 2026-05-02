@@ -663,6 +663,14 @@ Task executed successfully.
             },
             {"role": "user", "content": self._build_mission_prompt(task)}
         ]
+        msgs.append({
+            "role": "user",
+            "content": (
+                f"ENV CACHE LOCKED ONCE: shell_profile={self.state.shell_profile}, root_dir={self.state.root_dir}. "
+                "Do not use ls/dir. For project listing, use run_python_script with "
+                "`import os; print(os.listdir('demo_counter_app'))`."
+            ),
+        })
 
         # Layer 3: automatic skill routing
         selected_skills = self._auto_select_skills(task)

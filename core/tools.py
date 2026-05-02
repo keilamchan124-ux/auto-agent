@@ -257,8 +257,10 @@ def run_cmd(cmd: str) -> str:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].strip("\"'").lower()
             if binary == "ls":
-                binary = "dir"
-                cmd = "dir" if len(args) == 1 else f"dir {' '.join(args[1:])}"
+                return _track_policy_error(
+                    "command",
+                    "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
+                )
             elif binary == "cat":
                 binary = "type"
                 cmd = "type" if len(args) == 1 else f"type {' '.join(args[1:])}"
@@ -273,6 +275,12 @@ def run_cmd(cmd: str) -> str:
             if not args:
                 return format_result(False, "Empty command.", error_type="execution_error")
             binary = args[0].lower()
+
+        if binary == "dir":
+            return _track_policy_error(
+                "command",
+                "Use run_python_script with `import os; print(os.listdir('demo_counter_app'))` instead of ls/dir."
+            )
 
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
         if is_windows and binary in unix_allow:
