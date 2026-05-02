@@ -40,6 +40,15 @@ def _normalize_text(value: Any) -> str:
     return str(value)
 
 
+
+
+def _is_error_action_payload(text: str) -> bool:
+    normalized = _normalize_text(text).strip().lower()
+    if not normalized:
+        return True
+    compact = "".join(normalized.split())
+    return '"action":"error"' in compact
+
 def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Keep only role + text, and make sure content is a string.
@@ -110,11 +119,16 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
         logger.warning("GLM rescue unavailable, fallback to Gemini: %s", e)
 
     try:
-        return _call_gemini_rescue(contents, retries=retries)
+        gemini_result = _call_gemini_rescue(contents, retries=retries)
+        if _is_error_action_payload(gemini_result):
+            logger.warning("Gemini rescue returned error action payload; falling back to Gemma 4.")
+        else:
+            return gemini_result
     except Exception as e:
         logger.warning("Gemini rescue unavailable, fallback to Gemma 4: %s", e)
-        if nim_err:
-            logger.debug("Earlier GLM/NIM error: %s", nim_err)
+
+    if nim_err:
+        logger.debug("Earlier GLM/NIM error: %s", nim_err)
 
     return _call_mimo_rescue(contents, retries=retries)
 
