@@ -13,15 +13,7 @@ class Config:
 
     # ===== MODELS =====
     MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    RESCUE_BACKEND = os.getenv("RESCUE_BACKEND", "mimo").strip().lower()  # gemini | mimo
-    _RESCUE_MODEL_RAW = os.getenv("RESCUE_MODEL", "").strip()
-    if _RESCUE_MODEL_RAW:
-        RESCUE_MODEL = _RESCUE_MODEL_RAW
-    elif RESCUE_BACKEND == "mimo":
-        RESCUE_MODEL = "gemma-4-31b-it"
-    else:
-        RESCUE_MODEL = GEMINI_MODEL
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemma-4-31b-it")
 
     # Base URL (with fallback)
     MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "").strip() or None
