@@ -39,6 +39,8 @@ class AgentState:
     task_mode: str = "general"
     shell_profile: str = "unknown"
     root_dir: str = ""
+    path_aliases: Dict[str, str] = field(default_factory=dict)
+    force_repair_mode: bool = False
 
 class Agent:
     def __init__(self):
@@ -648,6 +650,7 @@ Task executed successfully.
         self.state.task_mode = self._detect_task_mode(task)
         self.state.shell_profile = "windows" if os.name == "nt" else "unix"
         self.state.root_dir = str(Config.WORKSPACE_DIR)
+        self.state.path_aliases = {"project_root": ".", "artifacts_root": "artifacts"}
         self.save_state()
         logger.info(
             "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
@@ -825,6 +828,16 @@ Task executed successfully.
                 kwargs = {}
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
+            if self.state.force_repair_mode and action == "plan":
+                msgs.append({
+                    "role": "user",
+                    "content": (
+                        "REPAIR MODE ACTIVE (policy_error). Plan is temporarily disabled. "
+                        "Choose exactly one action now: "
+                        "A) path fix, B) command fix, C) environment verify."
+                    ),
+                })
+                continue
             if action == "plan":
                 recent_plan_count = sum(1 for a in recent_actions[-9:] if a == "plan")
                 if recent_plan_count >= 2:
@@ -957,6 +970,8 @@ Task executed successfully.
                         res_data["message"] = f"{error_msg}\n{hint}"
                 else:
                     self.state.error_count += 1  # Runtime errors allow 2-3 retries.
+                if error_type == "policy_error":
+                    self.state.force_repair_mode = True
                 msgs.append({
                     "role": "user",
                     "content": self._build_tool_first_repair_prompt(action, res_data)
@@ -964,6 +979,8 @@ Task executed successfully.
             else:
                 self.state.error_count = 0
                 self.state.last_error = None
+                if action != "plan":
+                    self.state.force_repair_mode = False
 
             # D: compact result back to context
             self.append_clean_result(msgs, res_data)
