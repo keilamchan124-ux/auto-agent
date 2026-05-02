@@ -26,6 +26,11 @@ class Config:
     # Base URL (with fallback)
     MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "").strip() or None
 
+    # ===== NVIDIA NIM Gateway (OpenAI-compatible bridge for GLM) =====
+    NIM_GATEWAY_API_KEY = os.getenv("NIM_GATEWAY_API_KEY", "").strip()
+    NIM_GATEWAY_BASE_URL = os.getenv("NIM_GATEWAY_BASE_URL", "").strip() or None
+    NIM_RESCUE_MODEL = os.getenv("NIM_RESCUE_MODEL", "").strip() or os.getenv("NIM_DEEPSEEK_MODEL", "glm-4.7")
+
     # ===== WORKSPACE =====
     WORKSPACE_DIR = Path(os.getenv("WORKSPACE_DIR", "workspace")).resolve()
     TODO_FILE = Path(os.getenv("TODO_FILE", "todo.txt"))
