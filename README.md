@@ -87,3 +87,10 @@ Fallback order is deterministic:
 - Repeat guarding now includes semantic signatures (not only raw action name) to reduce plan/retry loops with near-identical inputs.
 - Continuation tasks now require an explicit first-step workspace inventory scan (`run_cmd` with `ls`/`dir`) before other actions.
 - Windows command fallback now maps common directory-discovery commands (`find`/`where`/`tree`) to `dir /s /b` when blocked by allowlist.
+### MCP registry customization
+
+- Default registry is loaded from `mcp_registry.json` at repo root.
+- You can override via env:
+  - `MCP_REGISTRY_FILE=/path/to/registry.json`
+  - `MCP_REGISTRY_JSON='[{\"name\":\"...\",\"role\":\"...\"}]'`
+- `MCP_SERVERS` (comma-separated) still filters enabled servers from the loaded registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
