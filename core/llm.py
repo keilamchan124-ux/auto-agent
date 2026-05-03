@@ -153,7 +153,7 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
 
     contents.append({"role": "user", "parts": [{"text": rescue_prompt}]})
 
-    # Priority chain: GLM-4.7 (NVIDIA NIM) > Gemini > Gemma 4 (MIMO/OpenAI-compatible)
+    # Priority chain: GLM-4.7 (NVIDIA NIM) > Gemini > Gemma 4 (Gemini API key)
     LAST_RESCUE_EVENTS.clear()
     nim_err = None
     try:
@@ -206,9 +206,9 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
             logger.debug("Earlier GLM/NIM error: %s", nim_err)
 
     t0 = time.time()
-    out = _call_mimo_rescue(contents, retries=retries)
+    out = _call_gemma_rescue(contents, retries=retries)
     LAST_RESCUE_EVENTS.append({
-        "backend": "mimo_gemma",
+        "backend": "gemini_gemma",
         "status": "fallback_used",
         "error_code": "none",
         "attempt": retries + 1,
@@ -303,31 +303,24 @@ def _call_gemini_rescue(contents: list, retries: int = 2) -> str:
     return "```json\n{\"action\":\"error\",\"kwargs\":{}}\n```"
 
 
-def _call_mimo_rescue(contents: list, retries: int = 2) -> str:
-    last_err = None
-    rescue_messages = []
-    for c in contents:
-        role = "assistant" if c.get("role") == "model" else "user"
-        text = ""
-        parts = c.get("parts") or []
-        if parts and isinstance(parts[0], dict):
-            text = _normalize_text(parts[0].get("text", ""))
-        rescue_messages.append({"role": role, "content": text})
+def _call_gemma_rescue(contents: list, retries: int = 2) -> str:
+    if GEMINI_CLIENT is None:
+        raise RuntimeError("GEMINI_API_KEY is not set for gemma rescue backend.")
 
+    last_err = None
     for attempt in range(retries + 1):
         try:
-            res = MIMO_CLIENT.chat.completions.create(
-                model=(getattr(Config, "RESCUE_MODEL", "") or getattr(Config, "MIMO_MODEL", "mimo-v2.5-pro")),
-                messages=rescue_messages,
-                temperature=0.0,
+            response = GEMINI_CLIENT.models.generate_content(
+                model=(getattr(Config, "RESCUE_MODEL", "") or "gemma-4-31b-it"),
+                contents=contents,
             )
-            return (res.choices[0].message.content or "").strip()
+            return getattr(response, "text", "") or ""
         except Exception as e:
             last_err = e
-            logger.warning("MIMO rescue failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
+            logger.warning("Gemma rescue via Gemini key failed (attempt %s/%s): %s", attempt + 1, retries + 1, e)
             if attempt < retries:
                 _sleep_backoff(attempt)
-    logger.error("call_mimo_rescue failed: %s", last_err)
+    logger.error("call_gemma_rescue failed: %s", last_err)
     return "```json\n{\"action\":\"error\",\"kwargs\":{}}\n```"
 
 

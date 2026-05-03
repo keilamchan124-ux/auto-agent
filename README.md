@@ -49,7 +49,7 @@ Fallback order is deterministic:
 
 1. GLM via NVIDIA NIM
 2. Gemini
-3. Gemma via MIMO/OpenAI-compatible endpoint
+3. Gemma via Gemini API key
 
 `core/llm.py` now includes:
 - `_classify_error_code(...)`
