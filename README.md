@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — path/repeat/continuation hardening refresh
+> Last updated: 2026-05-03 (UTC) — stage-2 agent split + MCP externalization + dependency gate + web-server lease hardening
 
 ## Quick start
 
@@ -40,6 +40,8 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
 - `core/action_router.py`: centralized action dispatch and execution error normalization.
 - `core/agent_loop.py`: loop-level coordination helpers for dispatch/completion.
 - `core/modes.py`: STITCH/mobile mode-specific heuristics and gating helpers.
+- `core/agent_rescue_coordinator.py`: rescue-vs-primary-call coordination and fallback flow extraction.
+- `core/agent_step_executor.py`: step-level mark_done execution handling extraction.
 
 ## Fixed rescue chain
 
@@ -58,6 +60,7 @@ Fallback order is deterministic:
 
 - `prompt-tool-registry-consistency`: ensures prompt action list matches tool registry.
 - `mandatory-minimal-integration`: always runs a minimal non-mock smoke path in CI.
+- `import-requirements-consistency`: checks that top-level Python imports are declared in `requirements.txt` (prevents runtime missing dependency regressions such as `ddgs`).
 
 ## Runtime artifacts
 
@@ -74,7 +77,7 @@ Fallback order is deterministic:
 ## Known gaps
 
 1. `core/agent.py` still contains substantial orchestration complexity.
-2. Web-server lifecycle is file-metadata-based and not distributed-runner safe.
+2. Web-server lifecycle now uses lease/heartbeat + atomic metadata writes, but still depends on local process semantics across heterogeneous runners.
 3. Full mobile/browser integration confidence still depends on runner environment quality.
 
 
@@ -86,3 +89,12 @@ Fallback order is deterministic:
 - Repeat guarding now includes semantic signatures (not only raw action name) to reduce plan/retry loops with near-identical inputs.
 - Continuation tasks now require an explicit first-step workspace inventory scan (`run_cmd` with `ls`/`dir`) before other actions.
 - Windows command fallback now maps common directory-discovery commands (`find`/`where`/`tree`) to `dir /s /b` when blocked by allowlist.
+- Web-server metadata now includes lease owner/expiry/heartbeat and is persisted atomically to reduce cross-runner race windows.
+- Primary model-call exceptions are now captured in-loop with state persistence and recovery prompt injection.
+### MCP registry customization
+
+- Default registry is loaded from `mcp_registry.json` at repo root.
+- You can override via env:
+  - `MCP_REGISTRY_FILE=/path/to/registry.json`
+  - `MCP_REGISTRY_JSON='[{\"name\":\"...\",\"role\":\"...\"}]'`
+- `MCP_SERVERS` (comma-separated) still filters enabled servers from the loaded registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).

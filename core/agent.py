@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import time
-import shutil
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict, field
 import json_repair
@@ -27,6 +26,10 @@ from core.task_orchestrator import TaskOrchestrator
 from core.error_handler_service import ErrorHandlerService
 from core.mcp_policy_engine import McpPolicyEngine
 from core.skill_router import SkillRouter
+from core.agent_state_transition import AgentStateTransition
+from core.agent_task_lifecycle import AgentTaskLifecycle
+from core.agent_rescue_coordinator import AgentRescueCoordinator
+from core.agent_step_executor import AgentStepExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -77,14 +80,7 @@ class Agent:
         self.load_state()
 
     def load_state(self):
-        if self.state_file.exists():
-            try:
-                data = json.loads(self.state_file.read_text("utf-8"))
-                self.state = AgentState(**data)
-                return
-            except Exception as e:
-                logger.warning(f"Failed to load state: {e}")
-        self.state = AgentState()
+        AgentStateTransition.load_state(self, AgentState)
 
     def _try_local_repair(self) -> bool:
         """Attempt local repair without calling Gemini."""
@@ -108,29 +104,14 @@ class Agent:
         return """```json\n{"action":"plan","kwargs":{"steps":"1. Analyze the previous error\\n2. Retry with correct parameters\\n3. If still failing, switch strategy or skip this step"}}\n```"""
 
     def save_state(self):
-        self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
+        AgentStateTransition.save_state(self)
 
     def reset_counters(self):
-        self.state = AgentState()
-        self.save_state()
+        AgentStateTransition.reset_counters(self, AgentState)
 
     def _clean_workspace(self):
         """Clean workspace while preserving important files."""
-        important_files = {"state.json", "execution_trace.jsonl", "todo.txt"}
-        
-        for item in Config.WORKSPACE_DIR.iterdir():
-            if item.is_file() and item.name not in important_files:
-                try:
-                    item.unlink()
-                except Exception as e:
-                    logger.warning(f"Failed to delete {item.name}: {e}")
-            elif item.is_dir():
-                # Remove temporary folders, keep artifacts and hidden control folders.
-                if item.name not in {"artifacts", ".agents", ".antigravity"}:
-                    try:
-                        shutil.rmtree(item)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete dir {item.name}: {e}")
+        AgentStateTransition.clean_workspace()
 
     def _write_antigravity_report(self, task: str, success: bool, steps: int):
         report_path = Config.WORKSPACE_DIR / "artifacts" / "agent_execution_report.md"
@@ -595,45 +576,19 @@ Task executed successfully.
 
     # ---------- Main loop ----------
     def _queue_followup_task(self, original_task: str, step: int, max_steps: int) -> None:
-        trace_summary = self._analyze_current_task_trace()
-        failed_lines = "\n".join(
-            [f"- {action}: {count} failures" for action, count in trace_summary.get("top_failed_actions", [])]
-        ) or "- No explicit failed action patterns found."
-
-        followup = (
-            "CONTINUATION TASK (auto-generated after step limit reached)\n"
-            f"- Previous run stopped at step {step}/{max_steps}.\n"
-            f"- Read workspace/artifacts/traces/{self.current_task_id}.jsonl first, then workspace/state.json.\n"
-            f"- Trace summary: total_steps={trace_summary.get('total_steps', 0)}, "
-            f"failed_steps={trace_summary.get('failed_steps', 0)}, "
-            f"last_action={trace_summary.get('last_action')}.\n"
-            "- Top failed actions:\n"
-            f"{failed_lines}\n"
-            "- Create/refresh a TODO checklist of unfinished items.\n"
-            "- Continue execution until every checklist item is completed.\n"
-            "- Verify completion status explicitly before mark_done.\n\n"
-            "ORIGINAL TASK:\n"
-            f"{original_task}\n"
-        )
-        Config.TODO_FILE.write_text(followup, "utf-8")
+        AgentTaskLifecycle.queue_followup_task(self, original_task, step, max_steps)
         logger.info("📝 Queued continuation task in todo.txt for unfinished mission.")
 
     def run_task(self, task: str):
         self.reset_counters()
         self._clean_workspace()
-        self.current_task_id = f"task_{int(time.time())}"
-        self.current_task_text = task
-        self.state.task_mode = self._detect_task_mode(task)
-        self.state.shell_profile = "windows" if os.name == "nt" else "unix"
-        self.state.root_dir = str(Config.WORKSPACE_DIR)
-        self.state.path_aliases = {"project_root": ".", "artifacts_root": "artifacts"}
-        self.state.continuation_inventory_required = "CONTINUATION TASK" in str(task).upper()
+        env_ctx = AgentTaskLifecycle.initialize_task(self, task)
         self.save_state()
         logger.info(
             "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
-            os.name,
-            platform.system(),
-            Config.WORKSPACE_DIR,
+            env_ctx["os"],
+            env_ctx["platform"],
+            env_ctx["cwd"],
         )
 
         msgs: List[Dict[str, str]] = self.task_orchestrator.build_initial_messages(
@@ -701,83 +656,9 @@ Task executed successfully.
             if self.hard_reset_if_needed(msgs):
                 continue
 
-            # Decide whether to call Gemini rescue or main model
-            need_rescue = self.should_force_rescue()
-
-            if need_rescue:
-                if self.rescue_cooldown > 0:
-                    self.rescue_cooldown -= 1
-                    need_rescue = False
-                else:
-                    logger.warning("🆘 Agent stuck. Trying local repair first...")
-                    
-                    # Phase 1: local repair without Gemini
-                    local_repair_success = self._try_local_repair()
-                    
-                    if local_repair_success:
-                        logger.info("✅ Local repair succeeded, skipping Gemini rescue.")
-                        self.state.error_count = 0
-                        self.state.repeat_count = 0
-                        self.rescue_cooldown = 1
-                        continue
-                    
-                    # Phase 2: call Gemini only if local repair failed
-                    logger.warning("⚠️ Local repair failed, invoking Gemini rescue...")
-                    
-                    # Determine stuck reason for better rescue prompt
-                    stuck_reason = "Unknown stuck reason."
-                    if self.state.error_count >= 3:
-                        if self.state.last_error and ("missing" in str(self.state.last_error).lower() or "unexpected keyword" in str(self.state.last_error).lower() or "not found" in str(self.state.last_error).lower()):
-                            stuck_reason = f"TOOL PARAMETER ERROR: {self.state.last_error}"
-                        else:
-                            stuck_reason = f"RUNTIME ERROR: {self.state.last_error}"
-                    elif self.state.repeat_count >= 2:
-                        stuck_reason = f"REPEATING ACTION LOOP: Repeated {self.state.last_action} {self.state.repeat_count} times."
-                    elif self.state.search_count >= 4:
-                        stuck_reason = "SEARCH LOOP: Performed too many consecutive web searches."
-
-                    error_summary_prompt = (
-                        "You made an incorrect action.\n"
-                        f"Failure source: action `{self.state.last_action}` failed.\n"
-                        "Summarize the mistake in one sentence and state what to do next time.\n"
-                        "Format: {\"action\":\"plan\",\"kwargs\":{\"steps\":\"My mistake was ...; next I will ...\"}}"
-                    )
-                    
-                    msgs.append({
-                        "role": "user",
-                        "content": error_summary_prompt
-                    })
-                    
-                    rescue_text = rescue_orchestrator.run_rescue(
-                        trim_history_fn=self.trim_history,
-                        msgs=msgs,
-                        stuck_reason=stuck_reason,
-                        simple_fallback_plan_fn=self._simple_fallback_plan,
-                        workspace_dir=Config.WORKSPACE_DIR,
-                        run_id=self.current_task_id or "",
-                        task_id=self.current_task_id or "",
-                        step=step,
-                    )
-
-                    self.rescue_cooldown = 3   # After rescue, skip rescue for next 3 steps.
-                    
-                    parsed = self.extract_json(rescue_text)
-
-                    self.state.parse_fail_count = 0
-                    self.state.repeat_count = 0
-                    self.state.search_count = 0
-                    self.state.error_count = 0
-
-                    if not parsed:
-                        msgs.append({
-                            "role": "user",
-                            "content": "RESCUE ERROR: return exactly one fenced JSON block."
-                        })
-                        continue
-            else:
-                resp = llm.call_mimo(self.trim_history(msgs))
-                content = resp.get("content", "")
-                parsed = self.extract_json(content)
+            parsed = AgentRescueCoordinator.request_next_action(self, msgs, step)
+            if parsed is None:
+                continue
 
             # B: format fail handling
             if not parsed:
@@ -928,16 +809,11 @@ Task executed successfully.
             loop_ctx = LoopContext(task=task, step=step, max_steps=max_steps, execution_budget=execution_budget, phase=phase)
             # finish
             if action == "mark_done":
-                mobile_block_reason = modes.should_block_mobile_mark_done(
-                    self.state.task_mode,
-                    self.state.quality_gate_passed,
-                    self.state.quality_gate_web_warning,
-                )
-                if mobile_block_reason:
-                    msgs.append({"role": "user", "content": mobile_block_reason})
-                    continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
-                if self.agent_loop.complete_if_mark_done(action, kwargs, loop_ctx):
+                done_state = AgentStepExecutor.handle_mark_done(self, action, kwargs, loop_ctx, msgs)
+                if done_state == "blocked":
+                    continue
+                if done_state == "done":
                     break
 
             # execute via ActionRouter

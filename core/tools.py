@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict
 
@@ -1239,6 +1240,38 @@ def start_web_server(
                 health_error = str(e)
             time.sleep(0.3)
 
+        safe_task = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(task_id).strip() or "default")
+        meta_path = safe_path(f"artifacts/web_server_{safe_task}_{int(port)}.json")
+        lease_seconds = 120
+        now = time.time()
+
+        if meta_path.exists():
+            try:
+                existing = json.loads(meta_path.read_text("utf-8"))
+                existing_pid = int(existing.get("pid", 0))
+                existing_lease_exp = float(existing.get("lease_expires_at", 0))
+                existing_running = False
+                if existing_pid > 0:
+                    try:
+                        os.kill(existing_pid, 0)
+                        existing_running = True
+                    except Exception:
+                        existing_running = False
+                if existing_running and existing_lease_exp > now:
+                    return format_result(
+                        False,
+                        "Web server lease is held by another active runner.",
+                        error_type="concurrency_error",
+                        data={
+                            "meta_path": str(meta_path.relative_to(Config.WORKSPACE_DIR)),
+                            "pid": existing_pid,
+                            "lease_expires_at": existing_lease_exp,
+                        },
+                    )
+            except Exception:
+                pass
+
+        lease_owner = f"{os.getpid()}-{uuid.uuid4().hex[:10]}"
         server_meta = {
             "pid": proc.pid,
             "host": host,
@@ -1249,11 +1282,17 @@ def start_web_server(
             "healthy": healthy,
             "stdout_log": str(stdout_path.relative_to(Config.WORKSPACE_DIR)),
             "stderr_log": str(stderr_path.relative_to(Config.WORKSPACE_DIR)),
+            "lease_owner": lease_owner,
+            "lease_heartbeat_at": now,
+            "lease_expires_at": now + lease_seconds,
+            "lease_seconds": lease_seconds,
+            "meta_version": 2,
         }
-        safe_task = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(task_id).strip() or "default")
-        meta_path = safe_path(f"artifacts/web_server_{safe_task}_{int(port)}.json")
         meta_path.parent.mkdir(parents=True, exist_ok=True)
-        meta_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Atomic metadata write to reduce race windows across parallel runners.
+        tmp_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(server_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, meta_path)
 
         if not healthy:
             return format_result(False, f"Web server started but health check failed: {health_error}", data=server_meta, error_type="health_check_failed")
@@ -1296,6 +1335,18 @@ def stop_web_server(meta_path: str = "artifacts/web_server_default_8787.json") -
         except ProcessLookupError:
             stopped = True
             reason = "Process not found; treated as already stopped."
+
+        lease_expires_at = float(meta.get("lease_expires_at", 0))
+        if lease_expires_at > time.time():
+            # Allow stop only by same owner while lease is valid.
+            owner_hint = str(meta.get("lease_owner", ""))
+            if owner_hint and not owner_hint.startswith(f"{os.getpid()}-"):
+                return format_result(
+                    False,
+                    "Lease is held by another runner; refusing to stop active server.",
+                    error_type="concurrency_error",
+                    data={"lease_owner": owner_hint, "meta_path": meta_path, "pid": pid},
+                )
 
         p.unlink(missing_ok=True)
         return format_result(True, "Web server stop flow completed.", data={"pid": pid, "meta_path": meta_path, "stopped": stopped, "reason": reason})
@@ -1343,6 +1394,15 @@ def web_server_status(meta_path: str = "artifacts/web_server_default_8787.json",
 
         stdout_tail = _tail(meta.get("stdout_log", ""))
         stderr_tail = _tail(meta.get("stderr_log", ""))
+        lease_seconds = int(meta.get("lease_seconds", 120))
+        now = time.time()
+        meta["lease_heartbeat_at"] = now
+        meta["lease_expires_at"] = now + lease_seconds
+        # Atomic heartbeat update.
+        tmp_path = p.with_suffix(p.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, p)
+
         return format_result(
             True,
             "Web server status collected.",
@@ -1353,6 +1413,9 @@ def web_server_status(meta_path: str = "artifacts/web_server_default_8787.json",
                 "health_error": health_error,
                 "meta_path": meta_path,
                 "url": url,
+                "lease_owner": meta.get("lease_owner"),
+                "lease_expires_at": meta.get("lease_expires_at"),
+                "lease_heartbeat_at": meta.get("lease_heartbeat_at"),
                 "stdout_tail": _truncate(stdout_tail, 3000),
                 "stderr_tail": _truncate(stderr_tail, 3000),
             },
