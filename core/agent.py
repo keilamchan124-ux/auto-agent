@@ -56,6 +56,9 @@ class AgentState:
     completion_lock_enabled: bool = True
     execution_mode: str = "skill_first"
     consecutive_policy_errors: int = 0
+    last_action_signature: str = ""
+    semantic_repeat_count: int = 0
+    continuation_inventory_required: bool = False
 
 class Agent:
     def __init__(self):
@@ -397,12 +400,32 @@ Task executed successfully.
         )
 
     # ---------- Guards ----------
-    def update_repeat_guard(self, action: str) -> None:
+    def _build_action_signature(self, action: str, kwargs: Dict[str, Any]) -> str:
+        if action == "plan":
+            steps = str(kwargs.get("steps", "")).strip().lower()
+            steps = re.sub(r"\s+", " ", steps)
+            return f"plan:{steps[:160]}"
+        if action in {"read_file", "write_file"}:
+            path = tools._canonicalize_workspace_path(str(kwargs.get("path", "")))
+            return f"{action}:{path}"
+        if action == "run_cmd":
+            cmd = str(kwargs.get("cmd", "")).strip().lower()
+            cmd = re.sub(r"\s+", " ", cmd)
+            return f"run_cmd:{cmd[:160]}"
+        return action
+
+    def update_repeat_guard(self, action: str, kwargs: Dict[str, Any]) -> None:
         if action == self.state.last_action:
             self.state.repeat_count += 1
         else:
             self.state.last_action = action
             self.state.repeat_count = 1
+        signature = self._build_action_signature(action, kwargs)
+        if signature == self.state.last_action_signature:
+            self.state.semantic_repeat_count += 1
+        else:
+            self.state.last_action_signature = signature
+            self.state.semantic_repeat_count = 1
 
     def should_force_rescue(self) -> bool:
         return recovery.should_force_rescue(
@@ -604,6 +627,7 @@ Task executed successfully.
         self.state.shell_profile = "windows" if os.name == "nt" else "unix"
         self.state.root_dir = str(Config.WORKSPACE_DIR)
         self.state.path_aliases = {"project_root": ".", "artifacts_root": "artifacts"}
+        self.state.continuation_inventory_required = "CONTINUATION TASK" in str(task).upper()
         self.save_state()
         logger.info(
             "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
@@ -849,8 +873,22 @@ Task executed successfully.
                     })
                     continue
 
+            if self.state.continuation_inventory_required:
+                required_cmd = "dir /b" if self.state.shell_profile == "windows" else "ls"
+                inventory_ok = action == "run_cmd" and str(kwargs.get("cmd", "")).strip().lower() in {required_cmd, "dir", "ls", "dir /s /b"}
+                if not inventory_ok:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "CONTINUATION INVENTORY GATE: first action must be a clean workspace inventory scan. "
+                            f"Run run_cmd(cmd='{required_cmd}') now."
+                        ),
+                    })
+                    continue
+                self.state.continuation_inventory_required = False
+
             # repeat guard
-            self.update_repeat_guard(action)
+            self.update_repeat_guard(action, kwargs)
             self.save_state()
             recent_actions.append(action)
 
@@ -871,6 +909,15 @@ Task executed successfully.
                 msgs.append({
                     "role": "user",
                     "content": f"STOP REPEATING {action}. Change your plan."
+                })
+                continue
+            if self.state.semantic_repeat_count >= 3:
+                msgs.append({
+                    "role": "user",
+                    "content": (
+                        f"SEMANTIC REPEAT GUARD: repeated near-identical action signature for `{action}`. "
+                        "Switch strategy: list files, read missing artifact, then write/execute."
+                    )
                 })
                 continue
 

@@ -139,9 +139,13 @@ def _canonicalize_workspace_path(path: str) -> str:
     - workspace/workspace/foo -> workspace/foo
     - workspace\\workspace\\foo -> workspace/foo
     """
-    normalized = str(path).replace("\\", "/")
-    while normalized.startswith("workspace/workspace/"):
+    normalized = str(path or "").strip().replace("\\", "/")
+    normalized = re.sub(r"^\./+", "", normalized)
+    normalized = re.sub(r"/+", "/", normalized)
+    while normalized.startswith("workspace/"):
         normalized = normalized[len("workspace/"):]
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
     return normalized
 
 
@@ -447,7 +451,11 @@ def run_cmd(cmd: str) -> str:
         if pytest_allowed:
             pass
         elif binary not in Config.ALLOWED_BINARIES:
-            return format_result(False, "Forbidden command.", error_type="security_error")
+            if is_windows and binary in {"find", "where", "tree"}:
+                cmd = "dir /s /b"
+                binary = "dir"
+            else:
+                return format_result(False, "Forbidden command.", error_type="security_error")
 
         if is_windows:
             r = subprocess.run(

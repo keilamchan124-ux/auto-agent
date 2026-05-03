@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC) — service split + MCP policy unification
+> Last updated: 2026-05-03 (UTC) — service split + MCP policy + continuation hardening
 
 ## Runtime loop
 
@@ -51,6 +51,10 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 - MCP usage is phase-aware (implementation vs UI verification).
 - Completion lock disallows premature `mark_done` without completion signal.
 - Rescue guidance now includes a deterministic decision matrix by error code.
+- Path handling uses centralized workspace canonicalization before file actions.
+- Repeat detection includes both action-name repetition and semantic action signatures.
+- Continuation tasks enforce a first-step inventory scan gate before write/execute actions.
+- Windows command handling includes guarded normalization/fallback for directory discovery.
 
 ## CI status
 
