@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC) — stage-2 split + configurable MCP registry + lease-safe web tooling
+> Last updated: 2026-05-03 (UTC) — stage-2 split + lightweight built-in MCP core + codegen-priority policy + lease-safe web tooling
 
 ## Runtime loop
 
@@ -14,7 +14,7 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 
 1. NIM/GLM
 2. Gemini
-3. Gemma (MIMO)
+3. Gemma (Gemini API key)
 
 ## Current module responsibilities
 
@@ -51,7 +51,8 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 ## Policy notes
 
 - MCP usage is phase-aware (implementation vs UI verification).
-- MCP registry source is configurable via `MCP_REGISTRY_JSON` / `MCP_REGISTRY_FILE` (default: `mcp_registry.json`).
+- Python-oriented implementation tasks now enforce early CodeGeneratorMCP usage when available.
+- MCP registry uses a lightweight built-in core set by default (`context7`, `codegeneratormcp`, optional `github` via `MCP_SERVERS`).
 - Completion lock disallows premature `mark_done` without completion signal.
 - Rescue guidance now includes a deterministic decision matrix by error code.
 - Path handling uses centralized workspace canonicalization before file actions.

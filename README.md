@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — stage-2 agent split + MCP externalization + dependency gate + web-server lease hardening
+> Last updated: 2026-05-03 (UTC) — stage-2 agent split + lightweight MCP core + dependency gate + web-server lease hardening
 
 ## Quick start
 
@@ -49,7 +49,7 @@ Fallback order is deterministic:
 
 1. GLM via NVIDIA NIM
 2. Gemini
-3. Gemma via MIMO/OpenAI-compatible endpoint
+3. Gemma via Gemini API key
 
 `core/llm.py` now includes:
 - `_classify_error_code(...)`
@@ -93,8 +93,7 @@ Fallback order is deterministic:
 - Primary model-call exceptions are now captured in-loop with state persistence and recovery prompt injection.
 ### MCP registry customization
 
-- Default registry is loaded from `mcp_registry.json` at repo root.
-- You can override via env:
-  - `MCP_REGISTRY_FILE=/path/to/registry.json`
-  - `MCP_REGISTRY_JSON='[{\"name\":\"...\",\"role\":\"...\"}]'`
-- `MCP_SERVERS` (comma-separated) still filters enabled servers from the loaded registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
+- Default registry is built in code (lightweight core MCP set).
+- `MCP_SERVERS` (comma-separated) filters enabled servers from the built-in registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
+- Recommended stable default for auto-agent: keep only `context7,codegeneratormcp` (optionally add `github` as a 3rd core MCP).
+- For Python-heavy implementation tasks, policy enforces early CodeGeneratorMCP usage when available.

@@ -18,7 +18,7 @@
 
 ### B) Implementation loop
 1. `read_file` / `github_read_file`
-2. `write_file` / `run_cmd`
+2. Prefer CodeGeneratorMCP first for code drafting, then `write_file` / `run_cmd` for integration
 3. Focused checks (`run_cmd`)
 4. Review task trace/progress artifacts
 5. If this is a continuation task, run an inventory scan first (`run_cmd` with `ls` or `dir /b`) before edits.
@@ -54,7 +54,7 @@ Use `mark_done` only when:
 
 ## MCP profile for Stitch
 
-- Implementation-first: `context7`, `github`, `codegeneratormcp`
+- Implementation-first: `context7`, `codegeneratormcp` (optionally add `github` as needed)
 - UI verify on-demand: `chrome-devtools`, `web-visual-feedback`
 - Optional security lane: `semgrep`
 

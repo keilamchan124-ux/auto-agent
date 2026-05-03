@@ -607,7 +607,7 @@ Task executed successfully.
             )
             msgs[0]["content"] += (
                 "\n\n[MCP PHASE POLICY - ENFORCED]\n"
-                "1) Implementation phase (default): prioritize `context7` + `github` + `codegeneratormcp`.\n"
+                "1) Implementation phase (default): prioritize `context7` + `codegeneratormcp` (optional `github` as third core MCP).\n"
                 "2) UI verify phase: use `chrome-devtools`/`web-visual-feedback` only when visual/runtime verification is required.\n"
                 "3) Do NOT call browser MCP tools during pure implementation/debug steps unless task explicitly asks for UI verification.\n"
             )
