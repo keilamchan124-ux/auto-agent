@@ -53,6 +53,7 @@ class AgentState:
     force_repair_mode: bool = False
     completion_lock_enabled: bool = True
     execution_mode: str = "skill_first"
+    consecutive_policy_errors: int = 0
 
 class Agent:
     def __init__(self):
@@ -751,7 +752,11 @@ Task executed successfully.
             "role": "user",
             "content": (
                 f"ENV CACHE LOCKED ONCE: shell_profile={self.state.shell_profile}, root_dir={self.state.root_dir}. "
-                "Prefer workspace-safe commands and keep tool arguments exact."
+                "Prefer workspace-safe commands and keep tool arguments exact.\n"
+                "CHEAT SHEET:\n"
+                "- Windows shell: dir /b, dir /s /b, type <file>, findstr <pattern> <file>\n"
+                "- Unix shell: ls, find . -maxdepth 3 -type f, cat <file>, head -n 50 <file>\n"
+                "- Avoid cross-platform mixing (e.g., don't use dir on Unix or find/grep on Windows)."
             ),
         })
 
@@ -949,6 +954,17 @@ Task executed successfully.
                 continue
 
             kwargs = self._auto_fix_kwargs(action, kwargs)
+            if self.state.consecutive_policy_errors >= 2:
+                required_cmd = "dir /b" if self.state.shell_profile == "windows" else "ls"
+                if action != "run_cmd" or str(kwargs.get("cmd", "")).strip() != required_cmd:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "REPAIR MODE ESCALATION: consecutive policy errors detected. "
+                            f"Run environment probe exactly once with run_cmd(cmd='{required_cmd}') before any other action."
+                        ),
+                    })
+                    continue
             if self.state.force_repair_mode and action == "plan":
                 msgs.append({
                     "role": "user",
@@ -1071,6 +1087,9 @@ Task executed successfully.
                     self.state.error_count += 1  # Runtime errors allow 2-3 retries.
                 if error_type == "policy_error":
                     self.state.force_repair_mode = True
+                    self.state.consecutive_policy_errors += 1
+                else:
+                    self.state.consecutive_policy_errors = 0
                 msgs.append({
                     "role": "user",
                     "content": self._build_tool_first_repair_prompt(action, res_data)
@@ -1078,6 +1097,7 @@ Task executed successfully.
             else:
                 self.state.error_count = 0
                 self.state.last_error = None
+                self.state.consecutive_policy_errors = 0
                 if action != "plan":
                     self.state.force_repair_mode = False
 
