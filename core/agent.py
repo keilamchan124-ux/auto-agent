@@ -728,9 +728,23 @@ Task executed successfully.
                         })
                         continue
             else:
-                resp = llm.call_mimo(self.trim_history(msgs))
-                content = resp.get("content", "")
-                parsed = self.extract_json(content)
+                try:
+                    resp = llm.call_mimo(self.trim_history(msgs))
+                    content = resp.get("content", "")
+                    parsed = self.extract_json(content)
+                except Exception as e:
+                    self.state.error_count += 1
+                    self.state.last_error = f"call_mimo_exception: {e}"
+                    self.save_state()
+                    logger.warning("⚠️ call_mimo raised exception: %s", e)
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "MODEL CALL ERROR: primary model call failed due to network/runtime error. "
+                            "Switch to a minimal recovery action (plan with one concrete next step), then continue."
+                        ),
+                    })
+                    continue
 
             # B: format fail handling
             if not parsed:
