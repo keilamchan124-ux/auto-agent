@@ -439,7 +439,7 @@ Task executed successfully.
         if action != "write_file" or not self.state.completion_lock_enabled:
             return True, ""
         path = str(kwargs.get("path", "")).replace("\\", "/")
-        protected_names = {"calc.py", "test_calc.py"}
+        protected_names = {"calc.py", "test_calc.py", "math_ops.py", "check_math.py"}
         if not any(path.endswith(f"/{name}") or path == name for name in protected_names):
             return True, ""
         parent = "/".join(path.split("/")[:-1]) if "/" in path else "."

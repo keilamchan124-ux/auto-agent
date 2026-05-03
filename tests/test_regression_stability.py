@@ -31,7 +31,7 @@ if "markitdown" not in sys.modules:
     sys.modules["markitdown"] = markitdown_stub
 
 import main
-from core.agent import Agent
+from core.agent import Agent, AgentState
 from core import tools as core_tools
 from core.config import Config
 
@@ -240,10 +240,23 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         ok2, msg2 = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "please update this github repo issue", enabled)
         self.assertFalse(ok2)
         self.assertIn("MCP_USAGE_REQUIRED", msg2)
-        ok3, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "generate REPORT.md with final status", enabled)
+        ok3, _ = Agent._enforce_mcp_usage_floor(ahttps://github.com/keilamchan124-ux/auto-agent/pull/17/conflict?name=tests%252Ftest_regression_stability.py&ancestor_oid=1c44481e89f9a0eb143e277d355c0cb556ae6ae2&base_oid=8afc53d89dff6b1e5bb5f0389d42145420af8532&head_oid=0ad92a110c3f52405d7204b68e525e63b3f73561gent, "write_file", 2, "generate REPORT.md with final status", enabled)
         self.assertTrue(ok3)
         ok4, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "previous PR title and issue summary text only", enabled)
         self.assertTrue(ok4)
+
+    def test_completion_lock_blocks_math_ops_after_report_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            demo = workspace / "loop_guard_demo"
+            demo.mkdir(parents=True, exist_ok=True)
+            (demo / "REPORT.md").write_text("done", "utf-8")
+            agent = Agent.__new__(Agent)
+            agent.state = AgentState(completion_lock_enabled=True)
+            with mock.patch("core.agent.Config.WORKSPACE_DIR", workspace):
+                ok, msg = Agent._enforce_completion_lock(agent, "write_file", {"path": "loop_guard_demo/math_ops.py"})
+            self.assertFalse(ok)
+            self.assertIn("COMPLETION_LOCK", msg)
 
 
 @unittest.skipUnless(os.getenv("RUN_SMOKE_INTEGRATION") == "1", "Smoke integration is optional and env-gated.")
