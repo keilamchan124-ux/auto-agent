@@ -96,3 +96,4 @@ Fallback order is deterministic:
 - Default registry is built in code (lightweight core MCP set).
 - `MCP_SERVERS` (comma-separated) filters enabled servers from the built-in registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
 - Recommended stable default for auto-agent: keep only `context7,codegeneratormcp` (optionally add `github` as a 3rd core MCP).
+- For Python-heavy implementation tasks, policy enforces early CodeGeneratorMCP usage when available.
