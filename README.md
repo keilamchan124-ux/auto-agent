@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC)
+> Last updated: 2026-05-03 (UTC) — modular services refresh
 
 ## Quick start
 
@@ -29,7 +29,11 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
 
 - `core/agent.py`: main orchestration loop and task lifecycle.
 - `core/state_trace.py`: runtime progress + trace writing manager.
-- `core/policy_gate.py`: phase-aware MCP/completion gates.
+- `core/task_orchestrator.py`: mission prompt + env-lock message construction.
+- `core/skill_router.py`: auto-select/preload skill routing and context offload.
+- `core/mcp_policy_engine.py`: MCP registry + phase/usage policy enforcement.
+- `core/error_handler_service.py`: post-action state transitions and repair prompts.
+- `core/command_normalizer.py`: centralized Windows/Unix command normalization rules.
 - `core/recovery.py`, `core/rescue_orchestrator.py`: rescue triggers and orchestration.
 - `core/llm.py`: model clients + fixed rescue chain + decision matrix.
 - `core/tools.py`: tool execution and safety boundaries.
@@ -64,6 +68,8 @@ Fallback order is deterministic:
 - `workspace/artifacts/runtime_progress.json`
 - `workspace/artifacts/dashboard.html`
 - `workspace/artifacts/rescue_events.jsonl`
+
+`render_progress_dashboard` now includes rescue event summary cards sourced from `rescue_events.jsonl`.
 
 ## Known gaps
 

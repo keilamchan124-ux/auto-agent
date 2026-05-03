@@ -17,14 +17,16 @@ from core import llm
 from core import tools
 from core import telemetry
 from core import policy
-from core import mcp_registry
 from core import recovery
 from core import rescue_orchestrator
 from core import modes
 from core.state_trace import StateTraceManager
-from core.policy_gate import PolicyGate
 from core.action_router import ActionRouter
 from core.agent_loop import AgentLoop, LoopContext
+from core.task_orchestrator import TaskOrchestrator
+from core.error_handler_service import ErrorHandlerService
+from core.mcp_policy_engine import McpPolicyEngine
+from core.skill_router import SkillRouter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -63,9 +65,12 @@ class Agent:
         self.rescue_cooldown = 0
         self.current_task_text = ""
         self.state_trace = StateTraceManager(Config.WORKSPACE_DIR)
-        self.policy_gate = PolicyGate()
         self.action_router = ActionRouter(self.execute_tool_safe)
         self.agent_loop = AgentLoop(self, self.action_router)
+        self.task_orchestrator = TaskOrchestrator()
+        self.error_handler = ErrorHandlerService()
+        self.mcp_policy_engine = McpPolicyEngine()
+        self.skill_router = SkillRouter()
         self.load_state()
 
     def load_state(self):
@@ -421,13 +426,7 @@ Task executed successfully.
         return modes.is_ui_verify_phase(self.state.task_mode, self.current_task_text or "", todo_text, step)
 
     def _enforce_mcp_phase_hard_gate(self, action: str, step: int) -> tuple[bool, str]:
-        browser_like_actions = {"capture_web_screenshot", "start_web_server", "stop_web_server", "web_server_status"}
-        if action in browser_like_actions and not self._is_ui_verify_phase(step):
-            return False, (
-                "MCP_PHASE_POLICY_VIOLATION: Browser/UI verification tools are only allowed in UI verify phase "
-                "(Stitch cadence steps 8/9/10). Continue with implementation-phase actions first."
-            )
-        return True, ""
+        return self.mcp_policy_engine.enforce_mcp_phase_hard_gate(action, step, self._is_ui_verify_phase)
 
     def _enforce_completion_lock(self, action: str, kwargs: Dict[str, Any]) -> tuple[bool, str]:
         if action != "write_file" or not self.state.completion_lock_enabled:
@@ -450,56 +449,10 @@ Task executed successfully.
         return True, ""
 
     def _build_mcp_routing_directive(self, task: str, enabled_mcps: List[Dict[str, str]]) -> str:
-        names = {m.get("name", "").lower() for m in enabled_mcps}
-        t = (task or "").lower()
-        directives = []
-        if "context7" in names and any(k in t for k in ["docs", "documentation", "api", "sdk", "reference"]):
-            directives.append("Use Context7 MCP early for source-grounded documentation lookups.")
-        if "github" in names and any(k in t for k in ["pr", "pull request", "issue", "repository", "github"]):
-            directives.append("Use GitHub MCP early for repository/PR/issue context.")
-        if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build"]):
-            directives.append("Use CodeGeneratorMCP in implementation phase for scaffolding/patch acceleration.")
-        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "console", "screenshot", "visual"]):
-            directives.append("Use Chrome DevTools MCP during UI verify phase only.")
-        if "semgrep" in names and any(k in t for k in ["security", "vulnerability", "hardening", "injection"]):
-            directives.append("Run Semgrep MCP checks before mark_done for security-sensitive tasks.")
-        if not directives:
-            return ""
-        return "[MCP ROUTING DIRECTIVE]\n" + "\n".join([f"- {d}" for d in directives])
+        return self.mcp_policy_engine.build_mcp_routing_directive(task, enabled_mcps)
 
     def _enforce_mcp_usage_floor(self, action: str, step: int, task: str, enabled_mcps: List[Dict[str, str]]) -> tuple[bool, str]:
-        """
-        Require at least one MCP-correlated action early when task semantics strongly suggest it.
-        This reduces passive MCP exposure where routing hints are ignored.
-        """
-        if step > 8:
-            return True, ""
-        names = {m.get("name", "").lower() for m in enabled_mcps}
-        t = (task or "").lower()
-        # Keep repo intent strict to avoid false positives from generic words
-        # in long prompts (e.g., "PR title" metadata in unrelated tasks).
-        repo_signals = [
-            r"\bgithub\b",
-            r"github\.com/",
-            r"\bowner/[a-z0-9_.-]+\b",
-            r"\bpull request\b",
-        ]
-        has_repo_signal = any(re.search(p, t) for p in repo_signals)
-        if "github" in names and has_repo_signal:
-            github_actions = {"github_read_file", "github_clone", "github_create_pr", "github_commit_push"}
-            if action not in github_actions and action not in {"plan", "read_file"}:
-                return False, (
-                    "MCP_USAGE_REQUIRED: This task is repository-centric. Use a GitHub MCP action early "
-                    "(github_read_file/github_clone/github_create_pr/github_commit_push) before generic actions."
-                )
-        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "screenshot", "visual"]):
-            ui_actions = {"capture_web_screenshot", "web_server_status", "start_web_server"}
-            if action not in ui_actions and action not in {"plan", "run_cmd", "read_file"}:
-                return False, (
-                    "MCP_USAGE_REQUIRED: This task is UI-centric. Use a UI verification action early "
-                    "(start_web_server/capture_web_screenshot/web_server_status)."
-                )
-        return True, ""
+        return self.mcp_policy_engine.enforce_mcp_usage_floor(action, step, task, enabled_mcps)
 
     def _determine_execution_mode(self, step: int) -> str:
         """
@@ -617,89 +570,7 @@ Task executed successfully.
             
         return "\n".join(summary)
 
-    # ---------- Auto Skill Router (Layer 3) ----------
-    def _auto_select_skills(self, task: str, max_skills: int = 4) -> List[str]:
-        """Rule-based skill routing using keyword scoring from task text."""
-        task_lower = task.lower()
-        skill_tags = getattr(Config, "SKILL_TAGS", {})
-
-        scores: Dict[str, int] = {}
-        for skill_name, info in skill_tags.items():
-            keywords = info.get("keywords", [])
-            score = 0
-            for kw in keywords:
-                if kw in task_lower:
-                    # Give higher score to multi-word keywords.
-                    score += 2 if " " in kw else 1
-            if score > 0:
-                scores[skill_name] = score
-
-        if not scores:
-            # Default fallback: always include a planning skill.
-            return ["planning-and-task-breakdown"]
-
-        # Sort by score descending and keep top entries.
-        sorted_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        selected = [name for name, _ in sorted_skills[:max_skills]]
-
-        # Ensure at least two skills by using presets when only one is matched.
-        if len(selected) == 1:
-            presets = getattr(Config, "SKILL_PRESETS", {})
-            for preset_skills in presets.values():
-                if selected[0] in preset_skills:
-                    for s in preset_skills:
-                        if s not in selected:
-                            selected.append(s)
-                            break
-                    break
-
-        return selected[:max_skills]
-
-    def _preload_skills(self, skill_names: List[str], msgs: List[Dict[str, str]]) -> List[str]:
-        """Preload selected skills into system prompt before the loop starts."""
-        loaded = []
-        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
-        for skill_name in skill_names:
-            # Dynamic context protection.
-            current_context_size = sum(len(m.get("content", "")) for m in msgs)
-            if current_context_size > 45000:   # Force offload when context exceeds 45k chars.
-                if self.state.loaded_skills:
-                    oldest = self.state.loaded_skills.pop(0)
-                    logger.warning("⚠️ Context too large, force offload: %s", oldest)
-
-            if len(self.state.loaded_skills) >= max_skills:
-                oldest_skill = self.state.loaded_skills.pop(0)
-                logger.info("🔄 Offloading oldest skill: %s", oldest_skill)
-                
-            try:
-                result_raw = tools.execute_tool("get_skill", {"skill_name": skill_name})
-                result = json.loads(result_raw)
-                if result.get("ok") and "data" in result:
-                    skill_content = result["data"].get("content", "")
-                    if skill_content:
-                        if skill_name not in self.state.loaded_skills:
-                            self.state.loaded_skills.append(skill_name)
-                        summarized = self._summarize_skill(skill_name, skill_content)
-                        msgs[0]["content"] += f"\n\n[AUTO-LOADED SKILL: {skill_name}]\n{summarized}"
-                        loaded.append(skill_name)
-                        logger.info("📦 Auto-loaded skill: %s", skill_name)
-            except Exception as e:
-                logger.warning("⚠️ Failed to auto-load skill '%s': %s", skill_name, e)
-
-        if loaded:
-            self.save_state()
-        return loaded
-
     # ---------- Main loop ----------
-    def _build_mission_prompt(self, task: str) -> str:
-        return (
-            "MISSION REQUIREMENTS:\n"
-            "1) You must call the `plan` action early with concrete steps.\n"
-            "2) For each major step, explicitly check whether it is completed.\n"
-            "3) Only call `mark_done` when all planned items are completed.\n\n"
-            f"USER TASK:\n{task}"
-        )
-
     def _queue_followup_task(self, original_task: str, step: int, max_steps: int) -> None:
         trace_summary = self._analyze_current_task_trace()
         failed_lines = "\n".join(
@@ -741,26 +612,13 @@ Task executed successfully.
             Config.WORKSPACE_DIR,
         )
 
-        msgs: List[Dict[str, str]] = [
-            {
-                "role": "system",
-                "content": Config.SYSTEM_PROMPT
-            },
-            {"role": "user", "content": self._build_mission_prompt(task)}
-        ]
-        msgs.append({
-            "role": "user",
-            "content": (
-                f"ENV CACHE LOCKED ONCE: shell_profile={self.state.shell_profile}, root_dir={self.state.root_dir}. "
-                "Prefer workspace-safe commands and keep tool arguments exact.\n"
-                "CHEAT SHEET:\n"
-                "- Windows shell: dir /b, dir /s /b, type <file>, findstr <pattern> <file>\n"
-                "- Unix shell: ls, find . -maxdepth 3 -type f, cat <file>, head -n 50 <file>\n"
-                "- Avoid cross-platform mixing (e.g., don't use dir on Unix or find/grep on Windows)."
-            ),
-        })
+        msgs: List[Dict[str, str]] = self.task_orchestrator.build_initial_messages(
+            task=task,
+            shell_profile=self.state.shell_profile,
+            root_dir=self.state.root_dir,
+        )
 
-        enabled_mcps = mcp_registry.get_enabled_mcp_registry()
+        enabled_mcps = self.mcp_policy_engine.get_enabled_registry()
         if enabled_mcps:
             mcp_lines = "\n".join([f"- {m['name']}: {m['role']}" for m in enabled_mcps])
             msgs[0]["content"] += (
@@ -779,9 +637,16 @@ Task executed successfully.
                 msgs[0]["content"] += "\n\n" + routing
 
         # Layer 3: automatic skill routing
-        selected_skills = self._auto_select_skills(task)
-        loaded_skills = self._preload_skills(selected_skills, msgs)
+        selected_skills = self.skill_router.auto_select_skills(task)
+        loaded_skills = self.skill_router.preload_skills(
+            skill_names=selected_skills,
+            msgs=msgs,
+            loaded_skills_state=self.state.loaded_skills,
+            summarize_skill=self._summarize_skill,
+            execute_tool=tools.execute_tool,
+        )
         if loaded_skills:
+            self.save_state()
             logger.info("🎯 Auto-loaded %d skills: %s", len(loaded_skills), loaded_skills)
             # Inform agent which skills are preloaded to avoid duplicate loading.
             msgs[0]["content"] += (
@@ -1061,45 +926,13 @@ Task executed successfully.
                 self.state.quality_gate_web_warning = bool(mobile_state["quality_gate_web_warning"])
                 self.state.quality_gate_web_warning_count = int(mobile_state["quality_gate_web_warning_count"])
 
-            if not res_data.get("ok", False):
-                self.state.last_error = str(res_data.get("message", ""))
-                
-                error_msg = res_data.get("message", "")
-                error_type = res_data.get("error_type", "")
-                
-                # Error-type specific recovery policies
-                if error_type == "tool_not_found" or "missing" in error_msg.lower() or "unexpected keyword" in error_msg.lower():
-                    logger.warning("🚨 Severe/tool parameter error detected, forcing rescue.")
-                    self.state.error_count = 3  # Raise directly to rescue trigger threshold.
-                    
-                    param_hints = {
-                        "read_file": "Correct format: read_file(path='file_path')",
-                        "write_file": "Correct format: write_file(path='file_path', content='...')",
-                        "get_skill": "Correct format: get_skill(skill_name='skill_name')",
-                        "plan": "Correct format: plan(steps='step content')",
-                        "run_python_script": "Correct format: run_python_script(code='python code')",
-                    }
-                    hint = param_hints.get(action, "")
-                    if hint:
-                        logger.warning("⚠️ Tool parameter hint: %s", hint)
-                        res_data["message"] = f"{error_msg}\n{hint}"
-                else:
-                    self.state.error_count += 1  # Runtime errors allow 2-3 retries.
-                if error_type == "policy_error":
-                    self.state.force_repair_mode = True
-                    self.state.consecutive_policy_errors += 1
-                else:
-                    self.state.consecutive_policy_errors = 0
-                msgs.append({
-                    "role": "user",
-                    "content": self._build_tool_first_repair_prompt(action, res_data)
-                })
-            else:
-                self.state.error_count = 0
-                self.state.last_error = None
-                self.state.consecutive_policy_errors = 0
-                if action != "plan":
-                    self.state.force_repair_mode = False
+            self.state, repair_msgs = self.error_handler.process_result(
+                state=self.state,
+                action=action,
+                res_data=res_data,
+                build_repair_prompt=self._build_tool_first_repair_prompt,
+            )
+            msgs.extend(repair_msgs)
 
             # D: compact result back to context
             self.append_clean_result(msgs, res_data)
