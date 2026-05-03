@@ -16,6 +16,10 @@ class TaskOrchestrator:
             "1) You must call the `plan` action early with concrete steps.\n"
             "2) For each major step, explicitly check whether it is completed.\n"
             "3) Only call `mark_done` when all planned items are completed.\n\n"
+            "4) Every plan must end in exactly one terminal step:\n"
+            "   - CALL mark_done (with completion evidence), OR\n"
+            "   - BLOCKED: <single blocking reason>.\n"
+            "5) Do not produce plans without a terminal step.\n\n"
             f"USER TASK:\n{task}"
         )
 
