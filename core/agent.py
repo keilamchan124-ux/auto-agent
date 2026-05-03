@@ -20,8 +20,11 @@ from core import policy
 from core import mcp_registry
 from core import recovery
 from core import rescue_orchestrator
+from core import modes
 from core.state_trace import StateTraceManager
 from core.policy_gate import PolicyGate
+from core.action_router import ActionRouter
+from core.agent_loop import AgentLoop, LoopContext
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -60,6 +63,8 @@ class Agent:
         self.current_task_text = ""
         self.state_trace = StateTraceManager(Config.WORKSPACE_DIR)
         self.policy_gate = PolicyGate()
+        self.action_router = ActionRouter(self.execute_tool_safe)
+        self.agent_loop = AgentLoop(self, self.action_router)
         self.load_state()
 
     def load_state(self):
@@ -406,25 +411,13 @@ Task executed successfully.
         return False
 
     def _is_ui_verify_phase(self, step: int) -> bool:
-        # Semantic trigger first: if task/checklist explicitly asks for visual verification.
-        semantic_triggers = ["ui verify", "visual verify", "screenshot", "browser validation", "web validation"]
-        task_text = (self.current_task_text or "").lower()
-        if any(k in task_text for k in semantic_triggers):
-            return True
         todo_text = ""
         try:
             if Config.TODO_FILE.exists():
-                todo_text = Config.TODO_FILE.read_text("utf-8", errors="replace").lower()
+                todo_text = Config.TODO_FILE.read_text("utf-8", errors="replace")
         except Exception:
             todo_text = ""
-        if any(k in todo_text for k in semantic_triggers):
-            return True
-
-        # Cadence fallback for stitch mode.
-        if self.state.task_mode != "stitch_flutter":
-            return False
-        mod = step % 10
-        return mod in (8, 9, 0)
+        return modes.is_ui_verify_phase(self.state.task_mode, self.current_task_text or "", todo_text, step)
 
     def _enforce_mcp_phase_hard_gate(self, action: str, step: int) -> tuple[bool, str]:
         browser_like_actions = {"capture_web_screenshot", "start_web_server", "stop_web_server", "web_server_status"}
@@ -1004,75 +997,53 @@ Task executed successfully.
             if action == "web_search":
                 self.state.search_count += 1
 
+            loop_ctx = LoopContext(task=task, step=step, max_steps=max_steps, execution_budget=execution_budget, phase=phase)
             # finish
             if action == "mark_done":
-                if self.state.task_mode == "mobile" and not self.state.quality_gate_passed:
-                    msgs.append({
-                        "role": "user",
-                        "content": (
-                            "QUALITY GATE REQUIRED: run validate_mobile_quality first. "
-                            "Only call mark_done after build/analyze/test gate passes."
-                        )
-                    })
-                    continue
-                if self.state.task_mode == "mobile" and self.state.quality_gate_web_warning:
-                    msgs.append({
-                        "role": "user",
-                        "content": (
-                            "QUALITY GATE POLICY: web warnings must be empty before mark_done. "
-                            "Re-run validate_mobile_quality with strict_web=true and fix web failures."
-                        )
-                    })
+                mobile_block_reason = modes.should_block_mobile_mark_done(
+                    self.state.task_mode,
+                    self.state.quality_gate_passed,
+                    self.state.quality_gate_web_warning,
+                )
+                if mobile_block_reason:
+                    msgs.append({"role": "user", "content": mobile_block_reason})
                     continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
-                self._write_antigravity_report(task, True, step)
-                self._update_runtime_progress(
-                    task, step, max_steps, phase=phase, current_action=action, last_result_ok=True, status="completed"
-                )
-                break
+                if self.agent_loop.complete_if_mark_done(action, kwargs, loop_ctx):
+                    break
 
-            # execute
-            try:
-                res_data = self.execute_tool_safe(action, kwargs)
-                
-                # Inject loaded skill content into system prompt to prevent history truncation loss.
-                if action in ["get_skill", "load_preset"] and res_data.get("ok") and "data" in res_data:
-                    skill_content = res_data["data"].get("content", "")
-                    if skill_content:
-                        target_name = res_data["data"].get("skill_name") or res_data["data"].get("preset") or action
-                        max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
+            # execute via ActionRouter
+            dispatch_result = self.agent_loop.dispatch_action(action, kwargs)
+            res_data = dispatch_result.result
+
+            # Inject loaded skill content into system prompt to prevent history truncation loss.
+            if action in ["get_skill", "load_preset"] and res_data.get("ok") and "data" in res_data:
+                skill_content = res_data["data"].get("content", "")
+                if skill_content:
+                    target_name = res_data["data"].get("skill_name") or res_data["data"].get("preset") or action
+                    max_skills = getattr(Config, "MAX_SKILLS_LOADED", 6)
+                    
+                    if len(self.state.loaded_skills) >= max_skills and target_name not in self.state.loaded_skills:
+                        oldest_skill = self.state.loaded_skills.pop(0)
+                        logger.info("🔄 Offloading oldest skill: %s", oldest_skill)
+
+                    if target_name not in self.state.loaded_skills:
+                        self.state.loaded_skills.append(target_name)
+                        self.save_state()
                         
-                        if len(self.state.loaded_skills) >= max_skills and target_name not in self.state.loaded_skills:
-                            oldest_skill = self.state.loaded_skills.pop(0)
-                            logger.info("🔄 Offloading oldest skill: %s", oldest_skill)
-
-                        if target_name not in self.state.loaded_skills:
-                            self.state.loaded_skills.append(target_name)
-                            self.save_state()
-                            
-                        summarized = self._summarize_skill(target_name, skill_content)
-                        msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
-                        # Avoid doubling context size by replacing heavy data payload.
-                        res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
-                        
-                if action == "plan" and res_data.get("ok", False):
-                    self.state.plan_executed_count += 1
-                if action == "validate_mobile_quality":
-                    validation_data = res_data.get("data") or {}
-                    self.state.quality_gate_passed = bool(
-                        res_data.get("ok", False) and validation_data.get("all_passed", False)
-                    )
-                    self.state.quality_gate_strict_web = bool(validation_data.get("strict_web", True))
-                    warning_rows = [r for r in validation_data.get("results", []) if r.get("step") == "web-validation-warning"]
-                    self.state.quality_gate_web_warning = len(warning_rows) > 0
-                    self.state.quality_gate_web_warning_count = len(warning_rows)
-
-            except Exception as e:
-                res_data = {
-                    "ok": False,
-                    "message": str(e),
-                    "error_type": "execution_error"
-                }
+                    summarized = self._summarize_skill(target_name, skill_content)
+                    msgs[0]["content"] += f"\n\n[LOADED: {target_name}]\n{summarized}"
+                    # Avoid doubling context size by replacing heavy data payload.
+                    res_data["data"] = {"status": "Successfully injected (summarized) into SYSTEM PROMPT."}
+                    
+            if action == "plan" and res_data.get("ok", False):
+                self.state.plan_executed_count += 1
+            if action == "validate_mobile_quality":
+                mobile_state = modes.extract_mobile_quality_state(res_data)
+                self.state.quality_gate_passed = bool(mobile_state["quality_gate_passed"])
+                self.state.quality_gate_strict_web = bool(mobile_state["quality_gate_strict_web"])
+                self.state.quality_gate_web_warning = bool(mobile_state["quality_gate_web_warning"])
+                self.state.quality_gate_web_warning_count = int(mobile_state["quality_gate_web_warning_count"])
 
             if not res_data.get("ok", False):
                 self.state.last_error = str(res_data.get("message", ""))

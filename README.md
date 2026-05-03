@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-02 (UTC)
+> Last updated: 2026-05-03 (UTC)
 
 ## Quick start
 
@@ -33,6 +33,9 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
 - `core/recovery.py`, `core/rescue_orchestrator.py`: rescue triggers and orchestration.
 - `core/llm.py`: model clients + fixed rescue chain + decision matrix.
 - `core/tools.py`: tool execution and safety boundaries.
+- `core/action_router.py`: centralized action dispatch and execution error normalization.
+- `core/agent_loop.py`: loop-level coordination helpers for dispatch/completion.
+- `core/modes.py`: STITCH/mobile mode-specific heuristics and gating helpers.
 
 ## Fixed rescue chain
 
@@ -67,3 +70,9 @@ Fallback order is deterministic:
 1. `core/agent.py` still contains substantial orchestration complexity.
 2. Web-server lifecycle is file-metadata-based and not distributed-runner safe.
 3. Full mobile/browser integration confidence still depends on runner environment quality.
+
+
+## Recent runtime-control updates
+
+- Rescue prompt contract in `core/llm.py` was tightened for stricter JSON-only output and more actionable recovery instructions.
+- Policy repair payloads in `core/tools.py` now include `suggested_repair_action` for auto-remediation guidance.

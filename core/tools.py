@@ -23,7 +23,47 @@ logger = logging.getLogger("Tools")
 _POLICY_ERROR_STREAK = {"type": None, "count": 0}
 
 
+def _build_policy_repair_action(policy_type: str, detail: str) -> Dict[str, Any]:
+    """Return an actionable next tool call suggestion for policy failures."""
+    d = str(detail or "")
+    if policy_type == "path":
+        if "workspace/" in d:
+            return {
+                "action": "plan",
+                "kwargs": {
+                    "steps": (
+                        "Convert target paths to cwd-relative form. "
+                        "Remove leading workspace/ prefix and retry the same tool."
+                    )
+                },
+                "reason": "Path policy typically fails due to workspace-prefixed or unsafe absolute paths.",
+            }
+        return {
+            "action": "read_file",
+            "kwargs": {"path": "README.md"},
+            "reason": "Read project docs first, then retry with a workspace-safe relative path.",
+        }
+    if policy_type == "command":
+        if "windows" in d.lower():
+            steps = "Switch to Windows-safe command equivalents (dir/type) and rerun run_cmd."
+        elif "unix" in d.lower():
+            steps = "Switch to Unix-safe command equivalents (ls/cat) and rerun run_cmd."
+        else:
+            steps = "Rewrite command using allowlisted binaries and retry run_cmd."
+        return {
+            "action": "plan",
+            "kwargs": {"steps": steps},
+            "reason": "Command policy failures are usually solved by command normalization.",
+        }
+    return {
+        "action": "plan",
+        "kwargs": {"steps": "Summarize policy error root cause and perform one concrete safe retry."},
+        "reason": "General policy remediation fallback.",
+    }
+
+
 def _policy_repair_template(policy_type: str, detail: str) -> str:
+    repair_action = _build_policy_repair_action(policy_type, detail)
     return format_result(
         False,
         f"POLICY REPAIR REQUIRED ({policy_type}): {detail}",
@@ -37,6 +77,8 @@ def _policy_repair_template(policy_type: str, detail: str) -> str:
                     "C: environment verify",
                 ],
             }
+            ,
+            "suggested_repair_action": repair_action,
         },
     )
 
