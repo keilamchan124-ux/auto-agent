@@ -1,6 +1,6 @@
 # Stitch Reference Development Mode
 
-> Last updated: 2026-05-03 (UTC) — continuation/inventory guard aligned
+> Last updated: 2026-05-03 (UTC) — continuation guard + lease-aware web verify flow
 
 ## Required task header
 
@@ -28,6 +28,7 @@
 2. `start_web_server`
 3. `capture_web_screenshot`
 4. `web_server_status`
+   - This call refreshes lease heartbeat/expiry in metadata; use it periodically during long screenshot/debug loops.
 5. metadata/checklist compare
 6. `stop_web_server`
 
@@ -66,6 +67,7 @@ Use `mark_done` only when:
 - `workspace/artifacts/dashboard.html`
 - `workspace/artifacts/rescue_events.jsonl`
 - `workspace/artifacts/web_server_<task_id>_<port>.json`
+  - includes `lease_owner`, `lease_heartbeat_at`, `lease_expires_at`, `lease_seconds`, `meta_version`
 - `workspace/artifacts/web_server_logs/stdout.log`
 - `workspace/artifacts/web_server_logs/stderr.log`
 
