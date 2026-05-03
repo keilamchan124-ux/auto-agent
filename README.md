@@ -58,6 +58,7 @@ Fallback order is deterministic:
 
 - `prompt-tool-registry-consistency`: ensures prompt action list matches tool registry.
 - `mandatory-minimal-integration`: always runs a minimal non-mock smoke path in CI.
+- `import-requirements-consistency`: checks that top-level Python imports are declared in `requirements.txt` (prevents runtime missing dependency regressions such as `ddgs`).
 
 ## Runtime artifacts
 
