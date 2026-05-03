@@ -7,12 +7,9 @@ from typing import Dict, List, Set
 
 
 DEFAULT_MCP_REGISTRY: List[Dict[str, str]] = [
-    {"name": "chrome-devtools", "role": "Browser runtime inspection (DOM/console/network/perf)."},
-    {"name": "github", "role": "Repository, PR, and issue context/actions."},
-    {"name": "web-visual-feedback", "role": "Screenshot-based UI verification and feedback loops."},
     {"name": "context7", "role": "Source-grounded documentation lookup."},
     {"name": "codegeneratormcp", "role": "Code generation and scaffold acceleration for implementation tasks."},
-    {"name": "semgrep", "role": "Security/static analysis checks before merge."},
+    {"name": "github", "role": "Repository, PR, and issue context/actions (optional third core)."},
 ]
 
 _NAME_TO_ITEM: Dict[str, Dict[str, str]] = {m["name"].lower(): m for m in DEFAULT_MCP_REGISTRY}

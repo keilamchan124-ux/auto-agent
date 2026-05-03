@@ -98,3 +98,4 @@ Fallback order is deterministic:
   - `MCP_REGISTRY_FILE=/path/to/registry.json`
   - `MCP_REGISTRY_JSON='[{\"name\":\"...\",\"role\":\"...\"}]'`
 - `MCP_SERVERS` (comma-separated) still filters enabled servers from the loaded registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
+- Recommended stable default for auto-agent: keep only `context7,codegeneratormcp` (optionally add `github` as a 3rd core MCP).
