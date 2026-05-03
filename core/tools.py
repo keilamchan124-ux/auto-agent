@@ -294,6 +294,33 @@ def _friendly_exec_error(err: Exception, cmd: str) -> str:
     return f"Failed to execute command: {cmd}. Details: {text}"
 
 
+def _normalize_cross_platform_cmd(cmd: str, is_windows: bool) -> tuple[str, str]:
+    """Translate common cross-platform shell commands into safe local equivalents."""
+    raw = cmd.strip()
+    if is_windows:
+        if re.match(r"^\s*ls\b", raw, flags=re.IGNORECASE):
+            tokens = shlex.split(raw, posix=False)
+            non_flags = [t for t in tokens[1:] if not str(t).startswith("-")]
+            target = non_flags[0] if non_flags else ""
+            return f"dir {target}".strip(), "dir"
+        if re.match(r"^\s*cat\b", raw, flags=re.IGNORECASE):
+            return re.sub(r"^\s*cat\b", "type", raw, flags=re.IGNORECASE), "type"
+        if re.match(r"^\s*pwd\s*$", raw, flags=re.IGNORECASE):
+            return "cd", "cd"
+        if re.match(r"^\s*find\b", raw, flags=re.IGNORECASE):
+            return "dir /s /b", "dir"
+        if re.match(r"^\s*grep\b", raw, flags=re.IGNORECASE):
+            return re.sub(r"^\s*grep\b", "findstr", raw, flags=re.IGNORECASE), "findstr"
+    else:
+        if re.match(r"^\s*dir\b", raw, flags=re.IGNORECASE):
+            return re.sub(r"^\s*dir\b", "ls", raw, flags=re.IGNORECASE), "ls"
+        if re.match(r"^\s*type\b", raw, flags=re.IGNORECASE):
+            return re.sub(r"^\s*type\b", "cat", raw, flags=re.IGNORECASE), "cat"
+        if re.match(r"^\s*findstr\b", raw, flags=re.IGNORECASE):
+            return re.sub(r"^\s*findstr\b", "grep", raw, flags=re.IGNORECASE), "grep"
+    return cmd, ""
+
+
 def run_cmd(cmd: str) -> str:
     """Execute shell command with binary allowlist and cross-platform normalization."""
     try:
