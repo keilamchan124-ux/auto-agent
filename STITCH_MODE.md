@@ -1,6 +1,6 @@
 # Stitch Reference Development Mode
 
-> Last updated: 2026-05-03 (UTC) — continuation guard + lease-aware web verify + stage-2 loop split context
+> Last updated: 2026-05-03 (UTC) — done gate + loop budget + terminal planning contract
 
 ## Required task header
 
@@ -51,6 +51,11 @@ Use `mark_done` only when:
 2. quality gate passed
 3. UI/web warnings resolved
 4. trace/progress artifacts updated
+5. Done Criteria Gate conditions pass (no pending file-op state + stable/no-diff write condition)
+
+If repeated planning/reflection reaches loop budget, run final verification and emit exactly one terminal outcome:
+- `CALL mark_done` (with completion evidence), or
+- `BLOCKED: <single blocking reason>`
 
 ## MCP profile for Stitch
 

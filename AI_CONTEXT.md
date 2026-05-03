@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC) — stage-2 split + lightweight built-in MCP core + codegen-priority policy + lease-safe web tooling
+> Last updated: 2026-05-03 (UTC) — done-gate enforcement + reflection budget + terminal-step planning
 
 ## Runtime loop
 
@@ -54,6 +54,9 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 - Python-oriented implementation tasks now enforce early CodeGeneratorMCP usage when available.
 - MCP registry uses a lightweight built-in core set by default (`context7`, `codegeneratormcp`, optional `github` via `MCP_SERVERS`).
 - Completion lock disallows premature `mark_done` without completion signal.
+- Done Criteria Gate further blocks `mark_done` unless TODO/checklist is clear, pending file-op state is false, and no-diff write streak threshold is met.
+- Planner loop budget limits repeated self-reflection/`plan` churn and pushes final verification with terminal outcome selection.
+- Mission prompt requires every plan to end with exactly one terminal step: `CALL mark_done` (with evidence) or `BLOCKED` (single reason).
 - Rescue guidance now includes a deterministic decision matrix by error code.
 - Path handling uses centralized workspace canonicalization before file actions.
 - Repeat detection includes both action-name repetition and semantic action signatures.

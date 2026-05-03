@@ -62,6 +62,10 @@ class AgentState:
     last_action_signature: str = ""
     semantic_repeat_count: int = 0
     continuation_inventory_required: bool = False
+    self_reflection_count: int = 0
+    no_diff_write_streak: int = 0
+    has_pending_file_op: bool = False
+    blocked_reason: Optional[str] = None
 
 class Agent:
     def __init__(self):
@@ -102,6 +106,16 @@ class Agent:
     def _simple_fallback_plan(self) -> str:
         """Simple fallback plan when Gemini is unavailable."""
         return """```json\n{"action":"plan","kwargs":{"steps":"1. Analyze the previous error\\n2. Retry with correct parameters\\n3. If still failing, switch strategy or skip this step"}}\n```"""
+
+    def _is_done_gate_satisfied(self) -> tuple[bool, str]:
+        checklist_done = not Config.TODO_FILE.exists() or not Config.TODO_FILE.read_text("utf-8", errors="replace").strip()
+        if not checklist_done:
+            return False, "Checklist/todo is not empty."
+        if self.state.has_pending_file_op:
+            return False, "Pending file operation exists."
+        if self.state.no_diff_write_streak < 2:
+            return False, "No-diff write streak is below threshold."
+        return True, "All done-gate checks passed."
 
     def save_state(self):
         AgentStateTransition.save_state(self)
@@ -746,6 +760,7 @@ Task executed successfully.
                 })
                 continue
             if action == "plan":
+                self.state.self_reflection_count += 1
                 recent_plan_count = sum(1 for a in recent_actions[-9:] if a == "plan")
                 if recent_plan_count >= 2:
                     msgs.append({
@@ -753,6 +768,17 @@ Task executed successfully.
                         "content": "PLAN THROTTLE: in any rolling 10 steps, max 2 plan actions. Execute concrete tool action now."
                     })
                     continue
+                if self.state.self_reflection_count >= 3:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "LOOP BUDGET REACHED: stop reflection/planning loops. "
+                            "Run final verification now, then choose exactly one terminal step: "
+                            "CALL mark_done with completion evidence OR BLOCKED: <single blocking reason>."
+                        ),
+                    })
+                    if action == "plan":
+                        continue
 
             if self.state.continuation_inventory_required:
                 required_cmd = "dir /b" if self.state.shell_profile == "windows" else "ls"
@@ -809,6 +835,13 @@ Task executed successfully.
             loop_ctx = LoopContext(task=task, step=step, max_steps=max_steps, execution_budget=execution_budget, phase=phase)
             # finish
             if action == "mark_done":
+                ok_done, done_reason = self._is_done_gate_satisfied()
+                if not ok_done:
+                    msgs.append({
+                        "role": "user",
+                        "content": f"DONE CRITERIA GATE FAILED: {done_reason} Finish outstanding work before mark_done."
+                    })
+                    continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
                 done_state = AgentStepExecutor.handle_mark_done(self, action, kwargs, loop_ctx, msgs)
                 if done_state == "blocked":
@@ -842,6 +875,15 @@ Task executed successfully.
                     
             if action == "plan" and res_data.get("ok", False):
                 self.state.plan_executed_count += 1
+            if action == "write_file":
+                message = str(res_data.get("message", "")).lower()
+                if "already up to date" in message or "no changes" in message:
+                    self.state.no_diff_write_streak += 1
+                else:
+                    self.state.no_diff_write_streak = 0
+                self.state.has_pending_file_op = not bool(res_data.get("ok", False))
+            elif res_data.get("ok", False):
+                self.state.has_pending_file_op = False
             if action == "validate_mobile_quality":
                 mobile_state = modes.extract_mobile_quality_state(res_data)
                 self.state.quality_gate_passed = bool(mobile_state["quality_gate_passed"])

@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — stage-2 agent split + lightweight MCP core + dependency gate + web-server lease hardening
+> Last updated: 2026-05-03 (UTC) — done-criteria gate + reflection loop budget + terminal-plan contract
 
 ## Quick start
 
@@ -83,6 +83,12 @@ Fallback order is deterministic:
 
 ## Recent runtime-control updates
 
+- `mark_done` is now guarded by a Done Criteria Gate in `core/agent.py`:
+  - `workspace/todo.txt` must be empty (or absent),
+  - no pending file-op state,
+  - no-diff write streak threshold satisfied.
+- Repeated `plan`/self-reflection is now budgeted; after threshold, the agent is forced into final verification and a terminal choice (`CALL mark_done` or `BLOCKED`).
+- Mission prompt contract now explicitly requires every plan to end with one terminal step (`CALL mark_done` with evidence, or `BLOCKED` with a single reason).
 - Rescue prompt contract in `core/llm.py` was tightened for stricter JSON-only output and more actionable recovery instructions.
 - Policy repair payloads in `core/tools.py` now include `suggested_repair_action` for auto-remediation guidance.
 - Path canonicalization is now more aggressive (`./`, duplicate separators, repeated `workspace/` prefixes) to reduce continuation path drift.
