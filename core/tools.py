@@ -18,6 +18,7 @@ from ddgs import DDGS
 from markitdown import MarkItDown
 
 from core.config import Config
+from core.command_normalizer import CommandNormalizer
 
 logger = logging.getLogger("Tools")
 _POLICY_ERROR_STREAK = {"type": None, "count": 0}
@@ -345,20 +346,11 @@ def run_cmd(cmd: str) -> str:
             pass
 
         # Cross-platform command normalization to reduce repetitive policy failures.
-        if is_windows and binary == "cat":
-            # `cat foo` -> `type foo`
-            cmd = re.sub(r"^\s*cat\b", "type", cmd, flags=re.IGNORECASE)
-            binary = "type"
-        if is_windows and binary == "ls":
-            # `ls`/`ls -la path` -> `dir path`
-            ls_tokens = shlex.split(cmd, posix=False)
-            target = ""
-            if len(ls_tokens) > 1:
-                # Ignore unix flags like -la and keep the first non-flag token as target.
-                non_flags = [t for t in ls_tokens[1:] if not str(t).startswith("-")]
-                target = non_flags[0] if non_flags else ""
-            cmd = f'dir {target}'.strip()
-            binary = "dir"
+        normalized_cmd, normalized_binary = CommandNormalizer.normalize(cmd, is_windows=is_windows)
+        if normalized_binary:
+            cmd = normalized_cmd
+            binary = normalized_binary
+            args = shlex.split(cmd, posix=False) if is_windows else shlex.split(cmd)
 
         # OS-specific safety gate: block cross-platform shell dialect mismatch.
         if is_windows and binary in unix_allow and binary != "ls":
@@ -1048,10 +1040,11 @@ def validate_mobile_quality(
 
 
 def render_progress_dashboard(output_path: str = "artifacts/dashboard.html") -> str:
-    """Render a simple local dashboard from runtime progress and task summaries."""
+    """Render a local dashboard from runtime progress, task summaries, and rescue events."""
     try:
         progress_path = Config.WORKSPACE_DIR / "artifacts" / "runtime_progress.json"
         summary_dir = Config.WORKSPACE_DIR / "artifacts" / "task_summaries"
+        rescue_events_path = Config.WORKSPACE_DIR / "artifacts" / "rescue_events.jsonl"
 
         progress = {}
         if progress_path.exists():
@@ -1065,6 +1058,25 @@ def render_progress_dashboard(output_path: str = "artifacts/dashboard.html") -> 
                 except Exception:
                     continue
 
+        rescue_events = []
+        rescue_status_counts = {"success": 0, "failed": 0, "other": 0}
+        if rescue_events_path.exists():
+            for line in rescue_events_path.read_text("utf-8", errors="replace").splitlines():
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    evt = json.loads(raw)
+                except Exception:
+                    continue
+                status = str(evt.get("status", "")).lower()
+                if status in rescue_status_counts:
+                    rescue_status_counts[status] += 1
+                else:
+                    rescue_status_counts["other"] += 1
+                rescue_events.append(evt)
+        latest_rescue_events = rescue_events[-50:]
+
         html = f"""<!doctype html>
 <html><head><meta charset='utf-8'><title>Agent Dashboard</title>
 <style>body{{font-family:Arial;margin:24px}} .card{{border:1px solid #ddd;padding:12px;margin:8px 0;border-radius:8px}}</style>
@@ -1072,12 +1084,22 @@ def render_progress_dashboard(output_path: str = "artifacts/dashboard.html") -> 
 <h1>Agent Runtime Dashboard</h1>
 <div class='card'><h2>Current Progress</h2><pre>{json.dumps(progress, ensure_ascii=False, indent=2)}</pre></div>
 <div class='card'><h2>Task Summaries (latest {len(summaries)})</h2><pre>{json.dumps(summaries, ensure_ascii=False, indent=2)}</pre></div>
+<div class='card'><h2>Rescue Events Summary</h2><pre>{json.dumps({"total": len(rescue_events), "status_counts": rescue_status_counts}, ensure_ascii=False, indent=2)}</pre></div>
+<div class='card'><h2>Rescue Events (latest {len(latest_rescue_events)})</h2><pre>{json.dumps(latest_rescue_events, ensure_ascii=False, indent=2)}</pre></div>
 </body></html>"""
 
         p = safe_path(output_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(html, encoding="utf-8")
-        return format_result(True, f"Dashboard rendered at {output_path}", data={"path": output_path, "summary_count": len(summaries)})
+        return format_result(
+            True,
+            f"Dashboard rendered at {output_path}",
+            data={
+                "path": output_path,
+                "summary_count": len(summaries),
+                "rescue_event_count": len(rescue_events),
+            },
+        )
     except Exception as e:
         return format_result(False, str(e), error_type="io_error")
 
