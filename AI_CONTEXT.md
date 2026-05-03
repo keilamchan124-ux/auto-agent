@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC) — service split + configurable MCP registry + lease-safe web tooling
+> Last updated: 2026-05-03 (UTC) — stage-2 split + configurable MCP registry + lease-safe web tooling
 
 ## Runtime loop
 
@@ -23,6 +23,8 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 - `core/action_router.py`: action dispatch facade + execution-error normalization
 - `core/agent_loop.py`: loop-level dispatch/completion helper
 - `core/task_orchestrator.py`: mission prompt + environment lock message construction
+- `core/agent_rescue_coordinator.py`: rescue decision path and primary-call fallback coordination
+- `core/agent_step_executor.py`: step-level completion handling (`mark_done`) extraction
 - `core/skill_router.py`: skill auto-routing and preload/offload lifecycle
 - `core/mcp_policy_engine.py`: MCP registry selection + phase gate + usage floor + routing directives
 - `core/error_handler_service.py`: centralized result/error state transitions and repair prompting

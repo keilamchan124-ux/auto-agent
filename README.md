@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — MCP registry externalization + dependency gate + web-server lease hardening
+> Last updated: 2026-05-03 (UTC) — stage-2 agent split + MCP externalization + dependency gate + web-server lease hardening
 
 ## Quick start
 
@@ -40,6 +40,8 @@ Autonomous loop-based Python agent for long-running execution, recovery, and art
 - `core/action_router.py`: centralized action dispatch and execution error normalization.
 - `core/agent_loop.py`: loop-level coordination helpers for dispatch/completion.
 - `core/modes.py`: STITCH/mobile mode-specific heuristics and gating helpers.
+- `core/agent_rescue_coordinator.py`: rescue-vs-primary-call coordination and fallback flow extraction.
+- `core/agent_step_executor.py`: step-level mark_done execution handling extraction.
 
 ## Fixed rescue chain
 

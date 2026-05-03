@@ -1,6 +1,6 @@
 # Stitch Reference Development Mode
 
-> Last updated: 2026-05-03 (UTC) — continuation guard + lease-aware web verify flow
+> Last updated: 2026-05-03 (UTC) — continuation guard + lease-aware web verify + stage-2 loop split context
 
 ## Required task header
 
@@ -77,3 +77,5 @@ Use `mark_done` only when:
 - UI verify cadence and semantic trigger logic are centralized in `core/modes.py:is_ui_verify_phase`.
 - Mobile completion guard logic is centralized in `core/modes.py:should_block_mobile_mark_done`.
 - Mobile quality parsing is centralized in `core/modes.py:extract_mobile_quality_state`.
+- Rescue branch coordination is centralized in `core/agent_rescue_coordinator.py`.
+- Step-level `mark_done` handling is centralized in `core/agent_step_executor.py`.
