@@ -93,7 +93,10 @@ def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: int = 2) -> str:
     """Rescue supervisor with fallback order: GLM-4.7 > Gemini 3.1 flash lite > Gemma 4."""
-    rescue_prompt = "You are a rescue controller for an execution agent.\n"
+    rescue_prompt = (
+        "You are RescueController, a strict JSON-only planner for a failing execution agent.\n"
+        "Goal: choose ONE highest-leverage next action that increases the chance of recovery.\n"
+    )
 
     if stuck_reason:
         rescue_prompt += f"The agent is currently stuck because: {stuck_reason}\n"
@@ -102,6 +105,7 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
         rescue_prompt += (
             f"Decision matrix code={code}.\n"
             f"Preferred next action={decision['action']} kwargs={decision['kwargs']} reason={decision['reason']}.\n"
+            "Priority: prefer concrete repair actions over more planning unless uncertainty is high.\n"
         )
 
         if "FORMAT" in stuck_reason or "JSON" in stuck_reason:
@@ -124,14 +128,21 @@ def call_gemini_rescue(history: list, stuck_reason: str | None = None, retries: 
             )
 
     rescue_prompt += (
-        "\nReturn ONLY one fenced JSON block.\n"
-        "No explanation. No markdown outside the JSON block. No thoughts.\n"
-        "Choose the single best next action to debug errors or recover from loop/format failure.\n"
+        "\nOUTPUT CONTRACT (must pass all):\n"
+        "1) Return EXACTLY one fenced JSON block.\n"
+        "2) JSON must include only: action (string), kwargs (object).\n"
+        "3) No extra keys (no confidence, no analysis, no notes).\n"
+        "4) kwargs must contain only parameters required by the selected action.\n"
+        "5) Do not call mark_done unless the task is demonstrably complete.\n"
+        "6) If previous step failed due to parameters, prioritize correcting parameters first.\n\n"
         "Available actions: web_search, download_file, run_cmd, write_file, read_file, run_python_script, get_skill, plan, mark_done.\n"
-        "Note: Use run_cmd with 'pip install <pkg>' if you need third-party packages.\n\n"
-        "Use this exact format:\n"
+        "High-signal hints:\n"
+        "- Missing package/dependency => run_cmd with pip install ...\n"
+        "- Unknown file/path issue => read_file first, then precise fix\n"
+        "- Tool schema confusion => choose plan with short, concrete corrective steps\n\n"
+        "Valid example:\n"
         "```json\n"
-        "{\"action\":\"run_python_script\",\"kwargs\":{\"code\":\"print('Debugging...')\"}}\n"
+        "{\"action\":\"run_cmd\",\"kwargs\":{\"cmd\":\"pip install -r requirements.txt\"}}\n"
         "```"
     )
 

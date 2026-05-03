@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-02 (UTC)
+> Last updated: 2026-05-03 (UTC)
 
 ## Runtime loop
 
@@ -19,7 +19,10 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 ## Current module responsibilities
 
 - `main.py`: process lock + startup lifecycle
-- `core/agent.py`: orchestration and loop control
+- `core/agent.py`: orchestration entrypoint and high-level loop control
+- `core/action_router.py`: action dispatch facade + execution-error normalization
+- `core/agent_loop.py`: loop-level dispatch/completion helper
+- `core/modes.py`: task-mode helpers for STITCH cadence and mobile quality gates
 - `core/state_trace.py`: runtime progress and trace persistence
 - `core/policy_gate.py`: phase-aware hard gates
 - `core/policy.py`: task mode detection
@@ -54,3 +57,4 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 1. `agent.py` still has a large surface area.
 2. Browser/mobile integration behavior is sensitive to CI runner dependencies.
 3. File-based server metadata may need stronger locking semantics.
+4. Mode logic is extracted but can be split further into per-mode strategy objects when scope grows.

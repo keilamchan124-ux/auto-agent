@@ -1,6 +1,6 @@
 # Stitch Reference Development Mode
 
-> Last updated: 2026-05-02 (UTC)
+> Last updated: 2026-05-03 (UTC)
 
 ## Required task header
 
@@ -66,3 +66,10 @@ Use `mark_done` only when:
 - `workspace/artifacts/web_server_<task_id>_<port>.json`
 - `workspace/artifacts/web_server_logs/stdout.log`
 - `workspace/artifacts/web_server_logs/stderr.log`
+
+
+## Mode helper mapping
+
+- UI verify cadence and semantic trigger logic are centralized in `core/modes.py:is_ui_verify_phase`.
+- Mobile completion guard logic is centralized in `core/modes.py:should_block_mobile_mark_done`.
+- Mobile quality parsing is centralized in `core/modes.py:extract_mobile_quality_state`.
