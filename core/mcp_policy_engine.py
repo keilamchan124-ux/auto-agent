@@ -58,8 +58,8 @@ class McpPolicyEngine:
             directives.append("Use Context7 MCP early for source-grounded documentation lookups.")
         if "github" in names and any(k in t for k in ["pr", "pull request", "issue", "repository", "github"]):
             directives.append("Use GitHub MCP early for repository/PR/issue context.")
-        if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build"]):
-            directives.append("Use CodeGeneratorMCP in implementation phase for scaffolding/patch acceleration.")
+        if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build", "python", "pytest", "pydantic", "fastapi", "flask", ".py"]):
+            directives.append("Use CodeGeneratorMCP first in implementation phase for code drafting/patch acceleration (especially Python tasks).")
         if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "console", "screenshot", "visual"]):
             directives.append("Use Chrome DevTools MCP during UI verify phase only.")
         if "semgrep" in names and any(k in t for k in ["security", "vulnerability", "hardening", "injection"]):
@@ -82,6 +82,13 @@ class McpPolicyEngine:
                 return False, (
                     "MCP_USAGE_REQUIRED: This task is repository-centric. Use a GitHub MCP action early "
                     "(github_read_file/github_clone/github_create_pr/github_commit_push) before generic actions."
+                )
+        if "codegeneratormcp" in names and any(k in t for k in ["python", ".py", "pytest", "fastapi", "flask", "refactor", "implement", "write code", "coding"]):
+            codegen_like = action.startswith("codegenerator") or ("codegen" in action) or action in {"plan", "read_file"}
+            if not codegen_like:
+                return False, (
+                    "MCP_USAGE_REQUIRED: This task is code-implementation heavy (especially Python). "
+                    "Use a CodeGeneratorMCP action early before generic execution actions."
                 )
         if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "screenshot", "visual"]):
             ui_actions = {"capture_web_screenshot", "web_server_status", "start_web_server"}
