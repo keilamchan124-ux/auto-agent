@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import time
-import shutil
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict, field
 import json_repair
@@ -27,6 +26,8 @@ from core.task_orchestrator import TaskOrchestrator
 from core.error_handler_service import ErrorHandlerService
 from core.mcp_policy_engine import McpPolicyEngine
 from core.skill_router import SkillRouter
+from core.agent_state_transition import AgentStateTransition
+from core.agent_task_lifecycle import AgentTaskLifecycle
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -77,14 +78,7 @@ class Agent:
         self.load_state()
 
     def load_state(self):
-        if self.state_file.exists():
-            try:
-                data = json.loads(self.state_file.read_text("utf-8"))
-                self.state = AgentState(**data)
-                return
-            except Exception as e:
-                logger.warning(f"Failed to load state: {e}")
-        self.state = AgentState()
+        AgentStateTransition.load_state(self, AgentState)
 
     def _try_local_repair(self) -> bool:
         """Attempt local repair without calling Gemini."""
@@ -108,29 +102,14 @@ class Agent:
         return """```json\n{"action":"plan","kwargs":{"steps":"1. Analyze the previous error\\n2. Retry with correct parameters\\n3. If still failing, switch strategy or skip this step"}}\n```"""
 
     def save_state(self):
-        self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False), "utf-8")
+        AgentStateTransition.save_state(self)
 
     def reset_counters(self):
-        self.state = AgentState()
-        self.save_state()
+        AgentStateTransition.reset_counters(self, AgentState)
 
     def _clean_workspace(self):
         """Clean workspace while preserving important files."""
-        important_files = {"state.json", "execution_trace.jsonl", "todo.txt"}
-        
-        for item in Config.WORKSPACE_DIR.iterdir():
-            if item.is_file() and item.name not in important_files:
-                try:
-                    item.unlink()
-                except Exception as e:
-                    logger.warning(f"Failed to delete {item.name}: {e}")
-            elif item.is_dir():
-                # Remove temporary folders, keep artifacts and hidden control folders.
-                if item.name not in {"artifacts", ".agents", ".antigravity"}:
-                    try:
-                        shutil.rmtree(item)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete dir {item.name}: {e}")
+        AgentStateTransition.clean_workspace()
 
     def _write_antigravity_report(self, task: str, success: bool, steps: int):
         report_path = Config.WORKSPACE_DIR / "artifacts" / "agent_execution_report.md"
@@ -595,45 +574,19 @@ Task executed successfully.
 
     # ---------- Main loop ----------
     def _queue_followup_task(self, original_task: str, step: int, max_steps: int) -> None:
-        trace_summary = self._analyze_current_task_trace()
-        failed_lines = "\n".join(
-            [f"- {action}: {count} failures" for action, count in trace_summary.get("top_failed_actions", [])]
-        ) or "- No explicit failed action patterns found."
-
-        followup = (
-            "CONTINUATION TASK (auto-generated after step limit reached)\n"
-            f"- Previous run stopped at step {step}/{max_steps}.\n"
-            f"- Read workspace/artifacts/traces/{self.current_task_id}.jsonl first, then workspace/state.json.\n"
-            f"- Trace summary: total_steps={trace_summary.get('total_steps', 0)}, "
-            f"failed_steps={trace_summary.get('failed_steps', 0)}, "
-            f"last_action={trace_summary.get('last_action')}.\n"
-            "- Top failed actions:\n"
-            f"{failed_lines}\n"
-            "- Create/refresh a TODO checklist of unfinished items.\n"
-            "- Continue execution until every checklist item is completed.\n"
-            "- Verify completion status explicitly before mark_done.\n\n"
-            "ORIGINAL TASK:\n"
-            f"{original_task}\n"
-        )
-        Config.TODO_FILE.write_text(followup, "utf-8")
+        AgentTaskLifecycle.queue_followup_task(self, original_task, step, max_steps)
         logger.info("📝 Queued continuation task in todo.txt for unfinished mission.")
 
     def run_task(self, task: str):
         self.reset_counters()
         self._clean_workspace()
-        self.current_task_id = f"task_{int(time.time())}"
-        self.current_task_text = task
-        self.state.task_mode = self._detect_task_mode(task)
-        self.state.shell_profile = "windows" if os.name == "nt" else "unix"
-        self.state.root_dir = str(Config.WORKSPACE_DIR)
-        self.state.path_aliases = {"project_root": ".", "artifacts_root": "artifacts"}
-        self.state.continuation_inventory_required = "CONTINUATION TASK" in str(task).upper()
+        env_ctx = AgentTaskLifecycle.initialize_task(self, task)
         self.save_state()
         logger.info(
             "🔎 ENV LOCKED: os=%s platform=%s cwd=%s",
-            os.name,
-            platform.system(),
-            Config.WORKSPACE_DIR,
+            env_ctx["os"],
+            env_ctx["platform"],
+            env_ctx["cwd"],
         )
 
         msgs: List[Dict[str, str]] = self.task_orchestrator.build_initial_messages(
