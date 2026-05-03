@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — modular services refresh
+> Last updated: 2026-05-03 (UTC) — path/repeat/continuation hardening refresh
 
 ## Quick start
 
@@ -82,3 +82,7 @@ Fallback order is deterministic:
 
 - Rescue prompt contract in `core/llm.py` was tightened for stricter JSON-only output and more actionable recovery instructions.
 - Policy repair payloads in `core/tools.py` now include `suggested_repair_action` for auto-remediation guidance.
+- Path canonicalization is now more aggressive (`./`, duplicate separators, repeated `workspace/` prefixes) to reduce continuation path drift.
+- Repeat guarding now includes semantic signatures (not only raw action name) to reduce plan/retry loops with near-identical inputs.
+- Continuation tasks now require an explicit first-step workspace inventory scan (`run_cmd` with `ls`/`dir`) before other actions.
+- Windows command fallback now maps common directory-discovery commands (`find`/`where`/`tree`) to `dir /s /b` when blocked by allowlist.

@@ -1,6 +1,6 @@
 # Stitch Reference Development Mode
 
-> Last updated: 2026-05-03 (UTC)
+> Last updated: 2026-05-03 (UTC) — continuation/inventory guard aligned
 
 ## Required task header
 
@@ -21,6 +21,7 @@
 2. `write_file` / `run_cmd`
 3. Focused checks (`run_cmd`)
 4. Review task trace/progress artifacts
+5. If this is a continuation task, run an inventory scan first (`run_cmd` with `ls` or `dir /b`) before edits.
 
 ### C) UI verify loop
 1. `flutter build web`
