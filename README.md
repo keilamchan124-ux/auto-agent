@@ -2,7 +2,7 @@
 
 Autonomous loop-based Python agent for long-running execution, recovery, and artifacted observability.
 
-> Last updated: 2026-05-03 (UTC) — stage-2 agent split + MCP externalization + dependency gate + web-server lease hardening
+> Last updated: 2026-05-03 (UTC) — stage-2 agent split + lightweight MCP core + dependency gate + web-server lease hardening
 
 ## Quick start
 

@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC) — stage-2 split + configurable MCP registry + lease-safe web tooling
+> Last updated: 2026-05-03 (UTC) — stage-2 split + lightweight built-in MCP core + lease-safe web tooling
 
 ## Runtime loop
 
@@ -14,7 +14,7 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 
 1. NIM/GLM
 2. Gemini
-3. Gemma (MIMO)
+3. Gemma (Gemini API key)
 
 ## Current module responsibilities
 

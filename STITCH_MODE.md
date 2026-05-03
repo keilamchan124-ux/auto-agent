@@ -54,7 +54,7 @@ Use `mark_done` only when:
 
 ## MCP profile for Stitch
 
-- Implementation-first: `context7`, `github`, `codegeneratormcp`
+- Implementation-first: `context7`, `codegeneratormcp` (optionally add `github` as needed)
 - UI verify on-demand: `chrome-devtools`, `web-visual-feedback`
 - Optional security lane: `semgrep`
 
