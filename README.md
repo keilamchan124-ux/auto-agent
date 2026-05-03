@@ -93,9 +93,6 @@ Fallback order is deterministic:
 - Primary model-call exceptions are now captured in-loop with state persistence and recovery prompt injection.
 ### MCP registry customization
 
-- Default registry is loaded from `mcp_registry.json` at repo root.
-- You can override via env:
-  - `MCP_REGISTRY_FILE=/path/to/registry.json`
-  - `MCP_REGISTRY_JSON='[{\"name\":\"...\",\"role\":\"...\"}]'`
-- `MCP_SERVERS` (comma-separated) still filters enabled servers from the loaded registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
+- Default registry is built in code (lightweight core MCP set).
+- `MCP_SERVERS` (comma-separated) filters enabled servers from the built-in registry (supports aliases like `chrome`, `devtools`, `visual`, `codegen`).
 - Recommended stable default for auto-agent: keep only `context7,codegeneratormcp` (optionally add `github` as a 3rd core MCP).
