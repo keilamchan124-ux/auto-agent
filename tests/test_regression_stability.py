@@ -240,7 +240,7 @@ class PromptRegistryConsistencyTests(unittest.TestCase):
         ok2, msg2 = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "please update this github repo issue", enabled)
         self.assertFalse(ok2)
         self.assertIn("MCP_USAGE_REQUIRED", msg2)
-        ok3, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "generate REPORT.md with final status", enabled)
+        ok3, _ = Agent._enforce_mcp_usage_floor(ahttps://github.com/keilamchan124-ux/auto-agent/pull/17/conflict?name=tests%252Ftest_regression_stability.py&ancestor_oid=1c44481e89f9a0eb143e277d355c0cb556ae6ae2&base_oid=8afc53d89dff6b1e5bb5f0389d42145420af8532&head_oid=0ad92a110c3f52405d7204b68e525e63b3f73561gent, "write_file", 2, "generate REPORT.md with final status", enabled)
         self.assertTrue(ok3)
         ok4, _ = Agent._enforce_mcp_usage_floor(agent, "write_file", 2, "previous PR title and issue summary text only", enabled)
         self.assertTrue(ok4)
