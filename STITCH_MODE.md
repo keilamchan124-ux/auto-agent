@@ -63,6 +63,7 @@ Use `mark_done` only when:
 - `workspace/artifacts/traces/<task_id>.jsonl`
 - `workspace/artifacts/task_summaries/<task_id>.summary.json`
 - `workspace/artifacts/dashboard.html`
+- `workspace/artifacts/rescue_events.jsonl`
 - `workspace/artifacts/web_server_<task_id>_<port>.json`
 - `workspace/artifacts/web_server_logs/stdout.log`
 - `workspace/artifacts/web_server_logs/stderr.log`

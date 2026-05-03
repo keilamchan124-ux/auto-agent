@@ -1,6 +1,6 @@
 # Agent V7.2 — Architecture Context
 
-> Last updated: 2026-05-03 (UTC)
+> Last updated: 2026-05-03 (UTC) — service split + MCP policy unification
 
 ## Runtime loop
 
@@ -22,9 +22,13 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 - `core/agent.py`: orchestration entrypoint and high-level loop control
 - `core/action_router.py`: action dispatch facade + execution-error normalization
 - `core/agent_loop.py`: loop-level dispatch/completion helper
+- `core/task_orchestrator.py`: mission prompt + environment lock message construction
+- `core/skill_router.py`: skill auto-routing and preload/offload lifecycle
+- `core/mcp_policy_engine.py`: MCP registry selection + phase gate + usage floor + routing directives
+- `core/error_handler_service.py`: centralized result/error state transitions and repair prompting
+- `core/command_normalizer.py`: centralized cross-platform command normalization
 - `core/modes.py`: task-mode helpers for STITCH cadence and mobile quality gates
 - `core/state_trace.py`: runtime progress and trace persistence
-- `core/policy_gate.py`: phase-aware hard gates
 - `core/policy.py`: task mode detection
 - `core/recovery.py`: rescue trigger policy
 - `core/rescue_orchestrator.py`: rescue call coordination + event sink
@@ -40,6 +44,7 @@ Primary LLM path is MIMO; rescue fallback order is fixed:
 - Progress: `workspace/artifacts/runtime_progress.json`
 - Dashboard: `workspace/artifacts/dashboard.html`
 - Rescue events: `workspace/artifacts/rescue_events.jsonl`
+- Dashboard now renders rescue event summary + latest rescue event list from JSONL.
 
 ## Policy notes
 
