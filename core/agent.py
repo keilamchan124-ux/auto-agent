@@ -28,6 +28,8 @@ from core.mcp_policy_engine import McpPolicyEngine
 from core.skill_router import SkillRouter
 from core.agent_state_transition import AgentStateTransition
 from core.agent_task_lifecycle import AgentTaskLifecycle
+from core.agent_rescue_coordinator import AgentRescueCoordinator
+from core.agent_step_executor import AgentStepExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgentV7.2")
@@ -654,97 +656,9 @@ Task executed successfully.
             if self.hard_reset_if_needed(msgs):
                 continue
 
-            # Decide whether to call Gemini rescue or main model
-            need_rescue = self.should_force_rescue()
-
-            if need_rescue:
-                if self.rescue_cooldown > 0:
-                    self.rescue_cooldown -= 1
-                    need_rescue = False
-                else:
-                    logger.warning("🆘 Agent stuck. Trying local repair first...")
-                    
-                    # Phase 1: local repair without Gemini
-                    local_repair_success = self._try_local_repair()
-                    
-                    if local_repair_success:
-                        logger.info("✅ Local repair succeeded, skipping Gemini rescue.")
-                        self.state.error_count = 0
-                        self.state.repeat_count = 0
-                        self.rescue_cooldown = 1
-                        continue
-                    
-                    # Phase 2: call Gemini only if local repair failed
-                    logger.warning("⚠️ Local repair failed, invoking Gemini rescue...")
-                    
-                    # Determine stuck reason for better rescue prompt
-                    stuck_reason = "Unknown stuck reason."
-                    if self.state.error_count >= 3:
-                        if self.state.last_error and ("missing" in str(self.state.last_error).lower() or "unexpected keyword" in str(self.state.last_error).lower() or "not found" in str(self.state.last_error).lower()):
-                            stuck_reason = f"TOOL PARAMETER ERROR: {self.state.last_error}"
-                        else:
-                            stuck_reason = f"RUNTIME ERROR: {self.state.last_error}"
-                    elif self.state.repeat_count >= 2:
-                        stuck_reason = f"REPEATING ACTION LOOP: Repeated {self.state.last_action} {self.state.repeat_count} times."
-                    elif self.state.search_count >= 4:
-                        stuck_reason = "SEARCH LOOP: Performed too many consecutive web searches."
-
-                    error_summary_prompt = (
-                        "You made an incorrect action.\n"
-                        f"Failure source: action `{self.state.last_action}` failed.\n"
-                        "Summarize the mistake in one sentence and state what to do next time.\n"
-                        "Format: {\"action\":\"plan\",\"kwargs\":{\"steps\":\"My mistake was ...; next I will ...\"}}"
-                    )
-                    
-                    msgs.append({
-                        "role": "user",
-                        "content": error_summary_prompt
-                    })
-                    
-                    rescue_text = rescue_orchestrator.run_rescue(
-                        trim_history_fn=self.trim_history,
-                        msgs=msgs,
-                        stuck_reason=stuck_reason,
-                        simple_fallback_plan_fn=self._simple_fallback_plan,
-                        workspace_dir=Config.WORKSPACE_DIR,
-                        run_id=self.current_task_id or "",
-                        task_id=self.current_task_id or "",
-                        step=step,
-                    )
-
-                    self.rescue_cooldown = 3   # After rescue, skip rescue for next 3 steps.
-                    
-                    parsed = self.extract_json(rescue_text)
-
-                    self.state.parse_fail_count = 0
-                    self.state.repeat_count = 0
-                    self.state.search_count = 0
-                    self.state.error_count = 0
-
-                    if not parsed:
-                        msgs.append({
-                            "role": "user",
-                            "content": "RESCUE ERROR: return exactly one fenced JSON block."
-                        })
-                        continue
-            else:
-                try:
-                    resp = llm.call_mimo(self.trim_history(msgs))
-                    content = resp.get("content", "")
-                    parsed = self.extract_json(content)
-                except Exception as e:
-                    self.state.error_count += 1
-                    self.state.last_error = f"call_mimo_exception: {e}"
-                    self.save_state()
-                    logger.warning("⚠️ call_mimo raised exception: %s", e)
-                    msgs.append({
-                        "role": "user",
-                        "content": (
-                            "MODEL CALL ERROR: primary model call failed due to network/runtime error. "
-                            "Switch to a minimal recovery action (plan with one concrete next step), then continue."
-                        ),
-                    })
-                    continue
+            parsed = AgentRescueCoordinator.request_next_action(self, msgs, step)
+            if parsed is None:
+                continue
 
             # B: format fail handling
             if not parsed:
@@ -895,16 +809,11 @@ Task executed successfully.
             loop_ctx = LoopContext(task=task, step=step, max_steps=max_steps, execution_budget=execution_budget, phase=phase)
             # finish
             if action == "mark_done":
-                mobile_block_reason = modes.should_block_mobile_mark_done(
-                    self.state.task_mode,
-                    self.state.quality_gate_passed,
-                    self.state.quality_gate_web_warning,
-                )
-                if mobile_block_reason:
-                    msgs.append({"role": "user", "content": mobile_block_reason})
-                    continue
                 logger.info("✅ DONE: %s", kwargs.get("summary", ""))
-                if self.agent_loop.complete_if_mark_done(action, kwargs, loop_ctx):
+                done_state = AgentStepExecutor.handle_mark_done(self, action, kwargs, loop_ctx, msgs)
+                if done_state == "blocked":
+                    continue
+                if done_state == "done":
                     break
 
             # execute via ActionRouter
