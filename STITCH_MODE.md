@@ -60,7 +60,7 @@ If repeated planning/reflection reaches loop budget, run final verification and 
 ## MCP profile for Stitch
 
 - Implementation-first: `context7`, `codegeneratormcp` (optionally add `github` as needed)
-- UI verify on-demand: `chrome-devtools`, `web-visual-feedback`
+- UI verify on-demand: built-in browser verification actions (`start_web_server`, `capture_web_screenshot`, `web_server_status`)
 - Optional security lane: `semgrep`
 
 ## Artifact contract

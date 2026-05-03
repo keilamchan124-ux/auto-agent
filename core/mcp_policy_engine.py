@@ -13,10 +13,6 @@ class McpPolicyEngine:
         {"name": "github", "role": "Repository, PR, and issue context/actions (optional third core)."},
     ]
     _ALIASES: Dict[str, str] = {
-        "chrome": "chrome-devtools",
-        "devtools": "chrome-devtools",
-        "visual": "web-visual-feedback",
-        "web-visual": "web-visual-feedback",
         "codegen": "codegeneratormcp",
         "code-generator": "codegeneratormcp",
     }
@@ -60,8 +56,6 @@ class McpPolicyEngine:
             directives.append("Use GitHub MCP early for repository/PR/issue context.")
         if "codegeneratormcp" in names and any(k in t for k in ["implement", "refactor", "scaffold", "generate", "build", "python", "pytest", "pydantic", "fastapi", "flask", ".py"]):
             directives.append("Use CodeGeneratorMCP first in implementation phase for code drafting/patch acceleration (especially Python tasks).")
-        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "console", "screenshot", "visual"]):
-            directives.append("Use Chrome DevTools MCP during UI verify phase only.")
         if "semgrep" in names and any(k in t for k in ["security", "vulnerability", "hardening", "injection"]):
             directives.append("Run Semgrep MCP checks before mark_done for security-sensitive tasks.")
         if not directives:
@@ -89,12 +83,5 @@ class McpPolicyEngine:
                 return False, (
                     "MCP_USAGE_REQUIRED: This task is code-implementation heavy (especially Python). "
                     "Use a CodeGeneratorMCP action early before generic execution actions."
-                )
-        if "chrome-devtools" in names and any(k in t for k in ["ui", "browser", "dom", "screenshot", "visual"]):
-            ui_actions = {"capture_web_screenshot", "web_server_status", "start_web_server"}
-            if action not in ui_actions and action not in {"plan", "run_cmd", "read_file"}:
-                return False, (
-                    "MCP_USAGE_REQUIRED: This task is UI-centric. Use a UI verification action early "
-                    "(start_web_server/capture_web_screenshot/web_server_status)."
                 )
         return True, ""

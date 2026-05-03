@@ -486,7 +486,7 @@ Task executed successfully.
                 "[COORDINATION MODE: MCP_FIRST]\n"
                 "- Use MCP tools first for verification tasks.\n"
                 "- Do NOT load or switch skills unless MCP evidence is insufficient.\n"
-                "- Preferred MCP set: chrome-devtools, web-visual-feedback."
+                "- Preferred MCP set: context7, codegeneratormcp, github."
             )
         return (
             "[COORDINATION MODE: SKILL_FIRST]\n"
@@ -622,7 +622,7 @@ Task executed successfully.
             msgs[0]["content"] += (
                 "\n\n[MCP PHASE POLICY - ENFORCED]\n"
                 "1) Implementation phase (default): prioritize `context7` + `codegeneratormcp` (optional `github` as third core MCP).\n"
-                "2) UI verify phase: use `chrome-devtools`/`web-visual-feedback` only when visual/runtime verification is required.\n"
+                "2) UI verify phase: use built-in browser verification tools only when visual/runtime verification is required.\n"
                 "3) Do NOT call browser MCP tools during pure implementation/debug steps unless task explicitly asks for UI verification.\n"
             )
             routing = self._build_mcp_routing_directive(task, enabled_mcps)
